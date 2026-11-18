@@ -321,7 +321,11 @@ static void build_about(void) {
             config_get()->language, 100);
     row_toggle(add_row(SET_ABOUT, "Diagnostico", "Registra entrada, red y rendimiento en /tmp/DRPS5.log"),
                &config_get()->debug.probe);
+#if defined(__has_include) && __has_include("../config/local_personal_seed.h")
     prow_t *app = add_row(SET_ABOUT, "DRPS5 " DRPS5_VERSION " Personal", "Edicion Personal • Reescalado 2K/4K + HDR");
+#else
+    prow_t *app = add_row(SET_ABOUT, "DRPS5 " DRPS5_VERSION, "Edicion Publica • Reescalado 2K/4K + HDR");
+#endif
     app->kind = ROW_INFO;
     g.about_ver = app->caption;
     add_row(SET_ABOUT, "Remote Play",
