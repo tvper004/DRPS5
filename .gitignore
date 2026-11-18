@@ -1,0 +1,62 @@
+# OS & IDE
+.DS_Store
+.idea/
+*.swp
+*.swo
+
+# Logs, backups & local recovery scripts
+*.log
+*.bak
+*.backup_*
+auto_recover.sh
+rescue_and_backup.sh
+sources.xml
+reinstall_apks/
+usr/
+
+# Build directories & caches
+out/
+build/
+build-webos/
+_build_*/
+_stage_*/
+_staging_*/
+classes/
+__pycache__/
+*.pyc
+*.pyo
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+
+# Generated installers & packages (publish via GitHub Releases)
+dist/
+*.ipk
+*.apk
+*.idsig
+*.dmg
+*.exe
+*.pak
+
+# Embedded runtimes & vendored third-party trees
+.venv/
+.venv_*/
+Windows/DRPS5/runtime/
+MacOS/DRPS5.app/
+DRPS5/DRPS5.app/
+WEBOS/V2/third_party/
+WEBOS/V2/chiaki-ng/
+WEBOS/V2/.git/
+
+# Keystores, secrets & local configs
+*.keystore
+*.jks
+.env
+.env.*
+drps5_config.json
+drps5.conf
+personal_seed.json
+local_personal_seed.h

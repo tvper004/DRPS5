@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DRPS5 Remote Play</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="bg-art"></div>
+
+  <div class="splash-overlay" id="splash">
+    <img class="splash-logo" src="assets/drps5_icon.png" alt="DRPS5" />
+    <div class="splash-title">DRPS5</div>
+    <div class="splash-sub" id="splash-sub">Remote Play 2.0</div>
+    <div class="spinner"></div>
+  </div>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="assets/drps5_icon.png" alt="DRPS5" />
+        <span class="brand-name">DRPS5</span>
+      </div>
+      <span class="pill" id="edition-badge">CARGANDO</span>
+
+      <nav class="tabs">
+        <button class="tab-btn active" id="tab-consoles" onclick="switchTab('consoles')">Consolas</button>
+        <button class="tab-btn" id="tab-settings" onclick="switchTab('settings')">Ajustes</button>
+      </nav>
+
+      <div class="topbar-right">
+        <span class="pill" id="pad-badge">Mando: Detectando</span>
+        <span class="pill pill-accent" id="hw-badge">GPU Ready</span>
+        <span class="clock" id="clock">--:--</span>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="tab-panel active" id="panel-consoles">
+        <div class="carousel" id="console-carousel"></div>
+        <div class="hero-card" id="hero-card">
+          <div class="hero-head">
+            <div>
+              <div class="hero-title" id="hero-title">Selecciona una consola</div>
+              <div class="hero-sub" id="hero-sub">—</div>
+            </div>
+            <span class="pill pill-accent" id="hero-quality-pill">1080p • 60 fps • H.265</span>
+          </div>
+          <div class="hero-actions" id="hero-actions"></div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-settings">
+        <div class="settings-cats" id="settings-cats"></div>
+        <div class="settings-list" id="settings-list"></div>
+      </section>
+    </main>
+
+    <footer class="hintbar">
+      <span class="hint-chip"><strong style="color:var(--ps-cross)">✕</strong> Seleccionar</span>
+      <span class="hint-chip"><strong style="color:var(--ps-circle)">◯</strong> Volver</span>
+      <span class="hint-chip"><strong style="color:var(--ps-triangle)">△</strong> Escanear DDP</span>
+      <span class="hint-chip"><strong style="color:var(--ps-square)">L1 / R1</strong> Pestañas</span>
+    </footer>
+  </div>
+
+  <div class="modal-backdrop" id="modal-console">
+    <div class="modal-sheet">
+      <div class="modal-title" id="modal-console-title">Vincular / Editar Consola</div>
+      <div class="field"><label>Nombre</label><input id="f-name" type="text" placeholder="Mi PS5" /></div>
+      <div class="field"><label>IP Local (LAN)</label><input id="f-local" type="text" placeholder="192.168.1.100" /></div>
+      <div class="field"><label>IP Remota (Tailscale / Pública)</label><input id="f-remote" type="text" placeholder="100.x.x.x o IP pública" /></div>
+      <div class="field"><label>Account ID (Base64, requerido para PIN)</label><input id="f-account" type="text" placeholder="Vincula PSN en Ajustes o pega Base64" /></div>
+      <div class="field"><label>PIN de vinculación (8 dígitos, solo si vas a vincular)</label><input id="f-pin" type="text" placeholder="00000000" /></div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btn-del-console" onclick="deleteEditingConsole()">Eliminar</button>
+        <button class="btn" onclick="closeConsoleModal()">Cancelar</button>
+        <button class="btn btn-primary" onclick="saveOrPairConsole()">Guardar / Vincular</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>

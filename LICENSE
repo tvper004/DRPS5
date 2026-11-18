@@ -1,0 +1,28 @@
+DRPS5 Remote Play — Licencia de Uso Personal Exclusivo (All Rights Reserved)
+Copyright (c) 2026 tvper004 / robb004. Todos los derechos reservados (All Rights Reserved).
+
+TÉRMINOS Y CONDICIONES DE USO:
+
+1. Autorización de Uso Personal:
+   Se concede permiso únicamente para descargar, instalar y ejecutar la aplicación
+   y su código fuente con fines estrictamente personales y no comerciales en
+   dispositivos propios del usuario (televisores LG webOS, Android, macOS y Windows).
+
+2. Restricciones:
+   Queda estrictamente prohibido sin autorización previa y por escrito del autor:
+   a) Vender, alquilar, sublicenciar o comercializar el software, sus instaladores
+      o cualquier componente del mismo.
+   b) Redistribuir copias binarias, instaladores modificados o paquetes en tiendas
+      de aplicaciones, sitios de descargas o repositorios de terceros.
+   c) Crear obras derivadas con fines comerciales o eliminar avisos de autoría
+      y atribución del proyecto original.
+
+3. Componentes de Terceros:
+   Este proyecto interactúa o enlaza librerías de terceros bajo sus respectivas
+   licencias (incluyendo SDL2, LVGL, PyAV/FFmpeg y libchiaki), cuyos avisos
+   se conservan en los directorios correspondientes.
+
+4. Exclusión de Garantía:
+   EL SOFTWARE SE PROPORCIONA "TAL CUAL", SIN GARANTÍA DE NINGÚN TIPO, EXPRESA
+   O IMPLÍCITA. EN NINGÚN CASO EL AUTOR SERÁ RESPONSABLE POR DAÑOS DERIVADOS
+   DEL USO O IMPOSIBILIDAD DE USO DE LA APLICACIÓN.

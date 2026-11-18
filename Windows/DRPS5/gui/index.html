@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DRPS5 - Pantalla Remota PS5</title>
+  <!-- INJECT_SEED_DATA -->
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Ventana principal -->
+  <div class="app-window">
+    
+    <!-- Barra superior de título (Sin botones duplicados) -->
+    <header class="titlebar">
+      <div class="title-branding">
+        <svg class="ps-logo-icon" viewBox="0 0 32 32" width="22" height="22" fill="currentColor">
+          <path d="M12.2 4.2C10.5 4.8 9.5 6.2 9.5 8v16.1l4.8 1.6V8.9c0-.9.6-1.5 1.5-1.5.8 0 1.5.6 1.5 1.5v4.5l4.8 1.6V8c0-2.8-2.3-4.9-5.1-4.9-1.6 0-3.3.6-4.8 1.1zm-4.3 15.3c-2.4.9-4.2 2-4.2 3.5 0 2.2 3.5 3.3 8.3 3.3 2.1 0 4.1-.2 5.8-.7l-1.4-2.2c-1.3.3-2.9.5-4.4.5-3.3 0-5.1-.6-5.1-1.4 0-.6.9-1.2 2.3-1.7l-1.3-1.3zm12.5 1.1c-1.1-.3-2.4-.6-3.8-.8l-1.5 2.1c1.3.2 2.5.4 3.5.7 1.4.4 2.1.9 2.1 1.5 0 .8-1.5 1.4-4.2 1.4-1.2 0-2.5-.1-3.7-.4l-1.4 2.2c1.7.4 3.5.6 5.1.6 4.8 0 7.8-1.4 7.8-3.7 0-1.7-1.4-2.8-3.9-3.6z"/>
+        </svg>
+        <span class="title-text">DRPS5 - Pantalla Remota PS5 & PS4</span>
+      </div>
+      <div class="title-status-badge">
+        <span class="badge-dot"></span>
+        <span id="title-status-text">Sin Login de PSN Requerido</span>
+      </div>
+    </header>
+
+    <!-- Cuerpo Principal con Panel Lateral (Sidebar contraíble por defecto) -->
+    <div class="app-body">
+      
+      <!-- Panel Lateral de Navegación -->
+      <aside class="app-sidebar collapsed" id="app-sidebar">
+        <div class="sidebar-top">
+          <button class="btn-sidebar-toggle" id="btn-sidebar-toggle" onclick="toggleSidebar()" title="Expandir/Contraer Menú">
+            <span class="toggle-icon">☰</span>
+          </button>
+          <span class="sidebar-brand-text">DRPS5</span>
+        </div>
+
+        <nav class="sidebar-nav">
+          <button class="nav-pill active" id="tab-btn-stream" onclick="selectTab('stream')" title="Pantalla Remota">
+            <span class="pill-icon">🎮</span>
+            <span class="pill-text">Pantalla Remota</span>
+          </button>
+          <button class="nav-pill" id="tab-btn-pair" onclick="selectTab('pair')" title="Vincular Consola (PIN)">
+            <span class="pill-icon">🔗</span>
+            <span class="pill-text">Vincular Consola</span>
+          </button>
+          <button class="nav-pill" id="tab-btn-settings" onclick="selectTab('settings')" title="Ajustes">
+            <span class="pill-icon">⚙️</span>
+            <span class="pill-text">Ajustes</span>
+          </button>
+          <button class="nav-pill" id="tab-btn-logs" onclick="selectTab('logs')" title="Registros & Diagnóstico">
+            <span class="pill-icon">📜</span>
+            <span class="pill-text">Registros</span>
+          </button>
+          <button class="nav-pill" id="tab-btn-gamepad" onclick="selectTab('gamepad')" title="Calibrar Mando">
+            <span class="pill-icon">🕹️</span>
+            <span class="pill-text">Mando</span>
+          </button>
+          <button class="nav-pill action-pill" id="btn-scan" onclick="scanNetwork()" title="Buscar Consolas en Red">
+            <span class="pill-icon">🔍</span>
+            <span class="pill-text">Buscar en Red</span>
+          </button>
+        </nav>
+      </aside>
+
+      <!-- Viewport Principal de Contenido -->
+      <div class="main-viewport">
+
+    <!-- ================================================================= -->
+    <!-- TAB 1: PANTALLA REMOTA (Stream Hero & Multi-Profile Hub)          -->
+    <!-- ================================================================= -->
+    <main class="tab-content active" id="tab-stream">
+      <div class="hero-backdrop">
+        <img src="assets/bg_main.jpg" class="hero-bg-img" alt="PS5 Main Background" />
+        <div class="hero-ambient-glow"></div>
+      </div>
+
+      <div class="hero-overlay-content">
+        
+        <!-- HUB CENTRAL DE PERFILES & MODOS DE RED -->
+        <div class="profile-hub-card glass-panel">
+          
+          <!-- Fila 1: Selector de Perfil y Botones de Gestión -->
+          <div class="prof-top-bar">
+            <div class="prof-selector-wrapper">
+              <span class="prof-badge-icon">🎮</span>
+              <span class="prof-label">Perfil:</span>
+              <select id="profile-select" class="custom-select-prof" onchange="onProfileSelected(this.value)">
+                <option value="prof_ps5_main">PS5 Principal</option>
+              </select>
+            </div>
+
+            <div class="prof-btn-group">
+              <button class="btn-prof-pill" onclick="openProfileModal(true)" title="Agregar nuevo perfil de PS5">
+                <span>➕ Nuevo Perfil</span>
+              </button>
+              <button class="btn-prof-pill btn-prof-pill-edit" onclick="openProfileModal(false)" title="Configurar IPs Local y Remota">
+                <span>⚙️ Configurar IPs</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Fila 2: Conmutador Segmentado de Red (Local vs Remoto) -->
+          <div class="network-mode-container">
+            <div class="network-segmented-switch">
+              <button class="net-tab active" id="tab-mode-local" onclick="switchNetworkMode('local')">
+                <span class="net-tab-icon">🏠</span>
+                <div class="net-tab-text">
+                  <span class="net-tab-name">Red Local (LAN)</span>
+                  <div class="net-ip-row">
+                    <span class="net-tab-ip" id="tab-mode-local-ip">Sin configurar</span>
+                    <span class="btn-quick-edit-ip" onclick="quickEditIp(event, 'local')" title="Cambiar IP Local">✏️</span>
+                  </div>
+                </div>
+              </button>
+              <button class="net-tab" id="tab-mode-remote" onclick="switchNetworkMode('remote')">
+                <span class="net-tab-icon">🌐</span>
+                <div class="net-tab-text">
+                  <span class="net-tab-name">Acceso Remoto (Internet)</span>
+                  <div class="net-ip-row">
+                    <span class="net-tab-ip" id="tab-mode-remote-ip">Sin configurar</span>
+                    <span class="btn-quick-edit-ip" onclick="quickEditIp(event, 'remote')" title="Configurar IP Pública">✏️</span>
+                  </div>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <!-- Fila 3: Estado de Conexión Activa -->
+          <div class="connection-status-strip">
+            <span class="cs-dot pulse" id="cs-indicator"></span>
+            <span class="cs-endpoint-label">Conectando a:</span>
+            <strong class="cs-endpoint-value" id="cs-active-endpoint">Sin configurar</strong>
+            <span class="cs-status-tag pending" id="cs-pairing-status">No vinculada</span>
+          </div>
+
+          <!-- Fila 4: Estado del Mando en Tiempo Real -->
+          <div class="controller-status-strip" id="home-controller-strip">
+            <span class="cs-dot cs-dot-ctrl offline" id="home-ctrl-dot"></span>
+            <span class="cs-endpoint-label">Mando:</span>
+            <strong class="cs-endpoint-value" id="home-ctrl-name">Buscando mando...</strong>
+            <span class="cs-status-tag tag-offline" id="home-ctrl-status">Desconectado</span>
+          </div>
+
+        </div>
+
+        <!-- Botón Gigante Eléctrico de Inicio de Transmisión -->
+        <div class="launch-container">
+          <button class="btn-launch-stream" id="btn-launch-stream" onclick="launchStream()">
+            <div class="launch-btn-glow"></div>
+            <div class="launch-btn-inner">
+              <span class="launch-icon">🚀</span>
+              <span class="launch-text">INICIAR PANTALLA REMOTA DE PS5</span>
+              <span class="launch-arrow">❯</span>
+            </div>
+          </button>
+          <div class="launch-subhint">
+            <span>⚡ Ultra Low Latency  •  🎮 DualSense Haptics & Triggers  •  Direct Peer-to-Peer</span>
+          </div>
+        </div>
+
+      </div>
+    </main>
+
+    <!-- ================================================================= -->
+    <!-- TAB 2: VINCULAR PS5 CON PIN                                       -->
+    <!-- ================================================================= -->
+    <main class="tab-content" id="tab-pair">
+      <div class="settings-backdrop">
+        <img src="assets/bg_settings.jpg" class="settings-bg-img" alt="PS5 Settings Background" />
+      </div>
+      <div class="pair-layout">
+        <div class="config-header">
+          <div class="config-title-icon pair-icon-glow">🔗</div>
+          <div class="config-title-text">
+            <h2>Vincular con Código PIN</h2>
+            <p>Conecta tu PlayStation 5 directamente sin cuenta ni contraseñas de PSN</p>
+          </div>
+        </div>
+
+        <!-- Banner de Perfil Objetivo para Vinculación -->
+        <div class="pair-target-profile-card glass-panel">
+          <div class="ptp-left">
+            <span class="ptp-icon">🎯</span>
+            <div>
+              <span class="ptp-label">Perfil a Vincular:</span>
+              <strong class="ptp-name" id="pair-target-profile-name">PS5 Principal</strong>
+            </div>
+          </div>
+          <div class="ptp-right">
+            <span class="ptp-mode" id="pair-target-profile-mode">🏠 Red Local: 192.168.1.100</span>
+          </div>
+        </div>
+
+        <!-- Banner cuando la consola YA ESTÁ VINCULADA -->
+        <div id="pair-already-paired-card" class="pair-already-card glass-panel" style="display: none;">
+          <div class="pac-top">
+            <span class="pac-icon">✅</span>
+            <div class="pac-title-box">
+              <h3>¡Esta PS5 ya se encuentra vinculada!</h3>
+              <p>El emparejamiento con PIN se realiza una única vez por consola. Para jugar fuera de casa (Internet), ¡no requieres volver a vincular!</p>
+            </div>
+          </div>
+
+          <div class="pac-content">
+            <div class="pac-field-block">
+              <label for="quick-pair-remote-ip">Dirección IP Pública o Hostname DDNS para Acceso Remoto:</label>
+              <div class="pac-input-row">
+                <input type="text" id="quick-pair-remote-ip" class="glass-input" placeholder="Ej. 181.65.120.45 o tu-casa.ddns.net">
+                <button class="btn-save-remote-ip" onclick="saveQuickRemoteIp()">
+                  <span>💾 Guardar IP Pública</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="pac-tips">
+              <div class="pac-tip-item">
+                <span class="tip-dot">🔹</span>
+                <span><strong>Redirección de puertos en tu Router:</strong> Puertos UDP <strong>9295 - 9297</strong> y <strong>9302 - 9304</strong> hacia la IP local <strong id="pap-local-ip-hint">192.168.1.100</strong>.</span>
+              </div>
+              <div class="pac-tip-item">
+                <span class="tip-dot">🔹</span>
+                <span>Al guardar, se activará <strong>🌐 Acceso Remoto</strong> y podrás iniciar tu pantalla remota de inmediato.</span>
+              </div>
+            </div>
+
+            <div class="pac-relink-toggle">
+              <button type="button" class="btn-relink-toggle" onclick="toggleRelinkForm()">
+                ¿Requieres volver a emparejar con un nuevo PIN? Haz clic aquí ▾
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="pair-card glass-panel">
+          <div class="pair-steps">
+            <div class="step-item">
+              <span class="step-num">1</span>
+              <span id="pair-step-1-text">En tu consola PS5, ve a: <strong>Ajustes &gt; Sistema &gt; Uso a distancia &gt; Vincular dispositivo</strong>.</span>
+            </div>
+            <div class="step-item">
+              <span class="step-num">2</span>
+              <span>Aparecerá en tu pantalla un código PIN numérico de 8 dígitos.</span>
+            </div>
+            <div class="step-item">
+              <span class="step-num">3</span>
+              <span id="pair-step-3-text">Introdúcelo a continuación y presiona <strong>Vincular PS5</strong>. ¡Listo para siempre!</span>
+            </div>
+          </div>
+
+          <div class="pair-form">
+            <div class="form-group">
+              <label for="pair-console-type">Modelo de Consola</label>
+              <div class="custom-select-wrapper">
+                <span class="select-badge" id="pair-console-badge">PS5</span>
+                <select id="pair-console-type" class="custom-select" onchange="onPairConsoleTypeChanged(this.value)">
+                  <option value="PS5" selected>PlayStation 5 (PS5)</option>
+                  <option value="PS4">PlayStation 4 (PS4)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="pair-ip" id="pair-ip-label">Dirección IP Local de la Consola</label>
+              <input type="text" id="pair-ip" class="glass-input" placeholder="Ej. 192.168.1.100">
+            </div>
+
+            <div class="form-group">
+              <label for="pair-pin">Código PIN de 8 dígitos</label>
+              <input type="text" id="pair-pin" class="glass-input pin-input" maxlength="8" placeholder="12345678">
+            </div>
+
+            <div class="form-group">
+              <label for="pair-acc">Account ID <span class="opt-tag">(Opcional)</span></label>
+              <input type="text" id="pair-acc" class="glass-input" placeholder="Decimal (1234567890123456789) o Base64">
+            </div>
+
+            <div class="pair-action-row">
+              <button class="btn-save-pair" id="btn-do-pair" onclick="executePairing()">
+                <span>🔗 Vincular PS5 Ahora</span>
+                <span class="save-arrow">❯</span>
+              </button>
+              <span class="pair-feedback" id="pair-feedback"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ================================================================= -->
+    <!-- TAB 3: AJUSTES / CONFIGURACIÓN                                    -->
+    <!-- ================================================================= -->
+    <main class="tab-content" id="tab-settings">
+      <div class="settings-backdrop">
+        <img src="assets/bg_settings.jpg" class="settings-bg-img" alt="PS5 Settings Background" />
+      </div>
+
+      <div class="settings-content-grid">
+        <div class="settings-left-col">
+          <div class="config-header">
+            <div class="config-title-icon">⚙️</div>
+            <div class="config-title-text">
+              <h2>Configuración</h2>
+              <p>Personaliza tu experiencia de Pantalla Remota</p>
+            </div>
+          </div>
+
+          <!-- Tarjeta 1: Calidad de Video -->
+          <div class="glass-panel setting-card">
+            
+            <!-- Opción 1: Resolución -->
+            <div class="setting-item">
+              <div class="setting-icon-col">
+                <span class="item-icon">🖥️</span>
+              </div>
+              <div class="setting-text-col">
+                <span class="item-title">Calidad de Video</span>
+                <span class="item-desc">Resolución nativa de transmisión</span>
+              </div>
+              <div class="custom-select-wrapper">
+                <span class="select-badge" id="res-select-badge">UHD</span>
+                <select id="set-resolution" class="custom-select" onchange="autoSaveSettings()">
+                  <option value="2160p">4K Ultra HD (2160p)</option>
+                  <option value="1440p">2K QHD (1440p)</option>
+                  <option value="1080p" selected>1080p (Full HD)</option>
+                  <option value="720p">720p (HD Equilibrado)</option>
+                  <option value="540p">540p (Modo Rápido)</option>
+                  <option value="360p">360p (Ultra Eficiente)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Opción 2: FPS -->
+            <div class="setting-item">
+              <div class="setting-icon-col">
+                <span class="item-icon">⚡</span>
+              </div>
+              <div class="setting-text-col">
+                <span class="item-title">Frecuencia de Fotogramas (FPS)</span>
+                <span class="item-desc">Fluidez de movimiento en pantalla</span>
+              </div>
+              <div class="custom-select-wrapper">
+                <span class="select-badge">FPS</span>
+                <select id="set-fps" class="custom-select" onchange="autoSaveSettings()">
+                  <option value="60">60 FPS (Ultra Fluido)</option>
+                  <option value="30">30 FPS (Bajo consumo)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Opción 3: Códec -->
+            <div class="setting-item">
+              <div class="setting-icon-col">
+                <span class="item-icon">📹</span>
+              </div>
+              <div class="setting-text-col">
+                <span class="item-title">Códec de Video</span>
+                <span class="item-desc">Formato de compresión por hardware</span>
+              </div>
+              <div class="custom-select-wrapper">
+                <span class="select-badge">▶</span>
+                <select id="set-codec" class="custom-select" onchange="autoSaveSettings()">
+                  <option value="hevc">HEVC (H.265 - Mejor Calidad)</option>
+                  <option value="h264">H.264 (Mayor Compatibilidad)</option>
+                </select>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Tarjeta 2: Audio & Pantalla Completa -->
+          <div class="glass-panel setting-card toggles-card">
+            <div class="toggle-item">
+              <div class="toggle-icon-col">
+                <span class="item-icon">🔊</span>
+              </div>
+              <div class="toggle-text-col">
+                <span class="toggle-title">Audio Estéreo (Opus 48kHz)</span>
+                <span class="toggle-note">Sonido de ultra-baja latencia directo de la PS5.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="set-audio" checked onchange="autoSaveSettings()">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="toggle-item">
+              <div class="toggle-icon-col">
+                <span class="item-icon">🔲</span>
+              </div>
+              <div class="toggle-text-col">
+                <span class="toggle-title">Pantalla Completa Automática</span>
+                <span class="toggle-note">La transmisión se abrirá directamente cubriendo toda la pantalla.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="set-fullscreen" onchange="autoSaveSettings()">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="toggle-item" id="hdr-toggle-item">
+              <div class="toggle-icon-col">
+                <span class="item-icon">✨</span>
+              </div>
+              <div class="toggle-text-col">
+                <span class="toggle-title">Alto Rango Dinámico (HDR 10-bit)</span>
+                <span class="toggle-note">Transmite con mayor profundidad de color (requiere códec HEVC y pantalla HDR10).</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="set-hdr" onchange="autoSaveSettings()">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="toggle-item">
+              <div class="toggle-icon-col">
+                <span class="item-icon">📊</span>
+              </div>
+              <div class="toggle-text-col">
+                <span class="toggle-title">Superposición HUD (FPS y Diagnóstico)</span>
+                <span class="toggle-note">Muestra la información de tasa de cuadros y estado del streaming en pantalla.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="set-hud" checked onchange="autoSaveSettings()">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Botón Guardar Ajustes -->
+          <button class="btn-save-settings" id="btn-save-settings" onclick="manualSaveSettings()">
+            <span class="save-icon">💾</span>
+            <span class="save-text">Guardar Ajustes</span>
+            <span class="save-arrow">❯</span>
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <!-- ================================================================= -->
+    <!-- TAB 4: REGISTROS & DIAGNÓSTICO (Logs en Vivo y Detección de Errores) -->
+    <!-- ================================================================= -->
+    <main class="tab-content" id="tab-logs">
+      <div class="settings-backdrop">
+        <img src="assets/bg_settings.jpg" class="settings-bg-img" alt="PS5 Background" />
+      </div>
+      <div class="logs-container glass-panel">
+        <div class="logs-header-bar">
+          <div class="logs-header-info">
+            <h3 class="logs-title">📜 Registro de Eventos y Diagnóstico</h3>
+            <span class="logs-subtitle">Monitorea la sesión, estado del mando (DualSense / Backbone) y cortes de conexión</span>
+          </div>
+          <div class="logs-header-actions">
+            <button class="btn-log-action" onclick="loadLogs(true)" title="Refrescar logs">
+              <span>🔄 Actualizar</span>
+            </button>
+            <button class="btn-log-action" onclick="clearLogs()" title="Limpiar archivo de logs">
+              <span>🧹 Limpiar</span>
+            </button>
+            <button class="btn-log-action" onclick="purgeOldLogs()" title="Eliminar registros con más de 30 días de antigüedad">
+              <span>🗑️ Borrar &gt;30 días</span>
+            </button>
+            <button class="btn-log-action btn-log-folder" onclick="openLogsFolder()" title="Abrir carpeta en Finder">
+              <span>📂 Abrir Carpeta</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Tarjeta de Diagnóstico Inteligente -->
+        <div class="log-diagnosis-banner" id="log-diagnosis-banner">
+          <div class="diag-icon" id="diag-icon">🟢</div>
+          <div class="diag-content">
+            <div class="diag-status" id="diag-status">Sistema Estable</div>
+            <div class="diag-detail" id="diag-detail">No se han detectado anomalías recientes en el motor de streaming.</div>
+          </div>
+        </div>
+
+        <!-- Terminal de Visualización de Logs -->
+        <div class="logs-terminal" id="logs-terminal">
+          <div class="log-empty-msg">Cargando registros...</div>
+        </div>
+
+        <div class="logs-footer-bar">
+          <span class="logs-file-path" id="logs-file-path">~/.drps5/launcher.log</span>
+          <div class="logs-footer-right">
+            <label class="logs-autoscroll-label">
+              <input type="checkbox" id="logs-autoscroll" checked> Auto-scroll
+            </label>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ================================================================= -->
+    <!-- TAB 5: CALIBRACIÓN Y MAPEO DE MANDOS (Backbone One / DualSense)  -->
+    <!-- ================================================================= -->
+    <main class="tab-content" id="tab-gamepad">
+      <div class="settings-backdrop">
+        <img src="assets/bg_settings.jpg" class="settings-bg-img" alt="PS5 Background" />
+      </div>
+      <div class="gamepad-container glass-panel">
+        <div class="gamepad-header-bar">
+          <div class="gamepad-header-info">
+            <h3 class="gamepad-title">🕹️ Calibración y Mapeo de Mandos</h3>
+            <span class="gamepad-subtitle">Detecta tu mando en tiempo real (Backbone One, DualSense, Xbox), comprueba sus botones y asigna el botón PS y Touchpad</span>
+          </div>
+          <div class="gamepad-header-actions">
+            <button class="btn-log-action" onclick="resetGamepadMapping()" title="Restablecer mapeo a valores por defecto">
+              <span>🔄 Restablecer</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Barra de Estado del Mando Detectado -->
+        <div class="gamepad-status-bar">
+          <div class="gamepad-badge-status" id="gp-badge-status">
+            <span class="status-dot gp-dot-offline" id="gp-dot"></span>
+            <span id="gp-device-name">Ningún mando detectado (Pulsa cualquier botón en tu mando para activarlo)</span>
+          </div>
+          <span class="gp-hint-text">Mando compatible con Web Gamepad API y SDL2 de ultra-baja latencia</span>
+        </div>
+
+        <!-- Temporizador de Prueba de Botones (40s) -->
+        <div class="gp-test-timer-banner" id="gp-test-timer-banner">
+          <div class="gp-test-timer-main">
+            <button id="btn-gp-test-timer" class="btn-gp-test-timer" onclick="toggleGamepadTestTimer(40)">
+              <span id="btn-gp-test-timer-icon">⏱️</span>
+              <span id="btn-gp-test-timer-label">Iniciar Prueba de Botones (40s)</span>
+            </button>
+            <div class="gp-test-timer-countdown-badge" id="gp-test-timer-badge" style="display: none;">
+              <span class="pulse-dot"></span>
+              <span id="gp-test-timer-seconds">40s restantes</span>
+            </div>
+          </div>
+          <span class="gp-test-timer-hint">
+            💡 <b>Modo Seguro de Prueba:</b> Al pulsar este botón tendrás 40 segundos para comprobar botones, cruceta, palancas y gatillos de tu mando libremente. Al finalizar el tiempo o pulsar Cancelar, el mando vuelve automáticamente al modo de navegación por menús para que nunca quedes atrapado.
+          </span>
+        </div>
+
+        <!-- Probador y Monitor en Tiempo Real -->
+        <div class="gamepad-test-section">
+          <h4 class="section-subtitle">Visualizador de Entradas en Vivo</h4>
+          <div class="gp-buttons-grid" id="gp-buttons-grid">
+            <!-- Botones generados dinámicamente B0 a B17 -->
+          </div>
+
+          <!-- Medidores de Sticks y Gatillos -->
+          <div class="gp-axes-grid">
+            <div class="gp-axis-card">
+              <span class="axis-label">Stick Izquierdo (X / Y)</span>
+              <div class="axis-visual" id="gp-stick-left-vis">
+                <div class="axis-point" id="gp-stick-left-point"></div>
+              </div>
+              <span class="axis-coords" id="gp-stick-left-coords">X: 0.00 | Y: 0.00</span>
+            </div>
+            <div class="gp-axis-card">
+              <span class="axis-label">Stick Derecho (X / Y)</span>
+              <div class="axis-visual" id="gp-stick-right-vis">
+                <div class="axis-point" id="gp-stick-right-point"></div>
+              </div>
+              <span class="axis-coords" id="gp-stick-right-coords">X: 0.00 | Y: 0.00</span>
+            </div>
+            <div class="gp-axis-card gp-trigger-card">
+              <span class="axis-label">Gatillo L2</span>
+              <div class="trigger-bar-container">
+                <div class="trigger-bar-fill" id="gp-trigger-l2-fill" style="width: 0%;"></div>
+              </div>
+              <span class="axis-coords" id="gp-trigger-l2-val">0%</span>
+            </div>
+            <div class="gp-axis-card gp-trigger-card">
+              <span class="axis-label">Gatillo R2</span>
+              <div class="trigger-bar-container">
+                <div class="trigger-bar-fill" id="gp-trigger-r2-fill" style="width: 0%;"></div>
+              </div>
+              <span class="axis-coords" id="gp-trigger-r2-val">0%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mapeo Personalizado de Teclas Especiales -->
+        <div class="gamepad-mapping-section">
+          <h4 class="section-subtitle">Mapeo de Botones Especiales de PS5</h4>
+          <p class="mapping-note">Asigna qué botón físico de tu mando activará el botón PS (Home) y el Touchpad en la consola.</p>
+          
+          <div class="mapping-cards-grid">
+            <!-- Mapeo Botón PS -->
+            <div class="mapping-card">
+              <div class="mapping-card-header">
+                <span class="mapping-icon">⚡</span>
+                <div class="mapping-info">
+                  <span class="mapping-name">Botón PS (Home / Salir del Juego)</span>
+                  <span class="mapping-desc">Abre el Centro de Control o sale de los juegos a la pantalla principal.</span>
+                </div>
+              </div>
+              <div class="mapping-card-controls">
+                <div class="assigned-badge" id="assigned-ps-badge">Botón 14 (Backbone One / PS)</div>
+                <button class="btn-capture-button" id="btn-capture-ps" onclick="startCaptureButton('ps')">
+                  <span>🎯 Capturar Botón</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Mapeo Touchpad -->
+            <div class="mapping-card">
+              <div class="mapping-card-header">
+                <span class="mapping-icon">📱</span>
+                <div class="mapping-info">
+                  <span class="mapping-name">Botón Touchpad (Panel Táctil)</span>
+                  <span class="mapping-desc">Emula la pulsación del touchpad central del DualSense.</span>
+                </div>
+              </div>
+              <div class="mapping-card-controls">
+                <div class="assigned-badge" id="assigned-touchpad-badge">Botón 16 (Captura / Touchpad)</div>
+                <button class="btn-capture-button" id="btn-capture-touchpad" onclick="startCaptureButton('touchpad')">
+                  <span>🎯 Capturar Botón</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Mapeo Options -->
+            <div class="mapping-card">
+              <div class="mapping-card-header">
+                <span class="mapping-icon">☰</span>
+                <div class="mapping-info">
+                  <span class="mapping-name">Botón Opciones (Start / Menú)</span>
+                  <span class="mapping-desc">Abre el menú de opciones dentro de los juegos.</span>
+                </div>
+              </div>
+              <div class="mapping-card-controls">
+                <div class="assigned-badge" id="assigned-options-badge">Botón 9 (Options)</div>
+                <button class="btn-capture-button" id="btn-capture-options" onclick="startCaptureButton('options')">
+                  <span>🎯 Capturar Botón</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Mapeo Share -->
+            <div class="mapping-card">
+              <div class="mapping-card-header">
+                <span class="mapping-icon">📤</span>
+                <div class="mapping-info">
+                  <span class="mapping-name">Botón Compartir (Create / Share)</span>
+                  <span class="mapping-desc">Menú de capturas de pantalla y clips de juego.</span>
+                </div>
+              </div>
+              <div class="mapping-card-controls">
+                <div class="assigned-badge" id="assigned-share-badge">Botón 8 (Share)</div>
+                <button class="btn-capture-button" id="btn-capture-share" onclick="startCaptureButton('share')">
+                  <span>🎯 Capturar Botón</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="mapping-save-bar">
+            <button class="btn-save-settings" onclick="saveGamepadMappingToBackend()">
+              <span class="save-icon">💾</span>
+              <span class="save-text">Guardar Mapeo de Mando</span>
+              <span class="save-arrow">❯</span>
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </main>
+
+    <!-- Barra de Estado Inferior -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span class="footer-status-msg" id="footer-msg">Listo para conectar.</span>
+      </div>
+      <div class="footer-right">
+        <span>drps5 v1.3.1 (Multi-Profile & Remote Edition)</span>
+      </div>
+    </footer>
+
+      </div> <!-- /main-viewport -->
+    </div> <!-- /app-body -->
+
+    <!-- ================================================================= -->
+    <!-- MODAL 1: GESTIÓN DE PERFIL (IP Local & IP Pública/Remota)         -->
+    <!-- ================================================================= -->
+    <div class="modal-overlay" id="profile-modal">
+      <div class="modal-card modal-profile-card">
+        <div class="modal-icon-glow">
+          <span>🎮</span>
+        </div>
+        <h3 class="modal-title" id="prof-modal-title">Configuración de Perfil</h3>
+        <p class="modal-body" style="margin-bottom: 14px;">
+          Define la IP Local (para dentro de casa) y la IP Pública o Hostname DDNS (para fuera de tu red local).
+        </p>
+
+        <div class="profile-form-grid">
+          <input type="hidden" id="prof-modal-id">
+          
+          <div class="form-group">
+            <label for="prof-modal-name">Nombre del Perfil</label>
+            <input type="text" id="prof-modal-name" class="glass-input" placeholder="Ej. PS5 Sala">
+          </div>
+
+          <div class="form-row-2col">
+            <div class="form-group">
+              <label for="prof-modal-local-ip">🏠 IP Local (En casa)</label>
+              <input type="text" id="prof-modal-local-ip" class="glass-input" placeholder="192.168.1.100">
+            </div>
+            <div class="form-group">
+              <label for="prof-modal-remote-ip">🌐 IP Pública / DDNS (Fuera de casa)</label>
+              <input type="text" id="prof-modal-remote-ip" class="glass-input" placeholder="201.85.x.x o mi-ps5.ddns.net">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="prof-modal-acc">Account ID de PlayStation <span class="opt-tag">(Opcional)</span></label>
+            <input type="text" id="prof-modal-acc" class="glass-input" placeholder="Ej. 1234567890123456789 o AAAAAAAAAAAAAAAAAAAAAA==">
+          </div>
+
+          <div class="form-group" id="prof-modal-pin-group">
+            <label for="prof-modal-pin">Código PIN de 8 Dígitos <span class="opt-tag" id="prof-modal-pin-hint">(Consola: Ajustes &gt; Sistema &gt; Uso a distancia &gt; Vincular dispositivo)</span></label>
+            <input type="text" id="prof-modal-pin" class="glass-input pin-input" maxlength="8" placeholder="12345678">
+          </div>
+
+          <!-- Caja de Guía de Puertos para Acceso Remoto -->
+          <div class="port-forward-card">
+            <div class="pfc-title">
+              <span>💡 Para jugar fuera de tu red local por Internet:</span>
+            </div>
+            <p class="pfc-desc">
+              Debes abrir / redirigir en tu router los siguientes puertos hacia la <strong>IP Local de tu PS5</strong>:<br>
+              • <strong>Puertos UDP:</strong> 9295, 9296, 9297, 9302, 9303, 9304<br>
+              • <strong>Puerto TCP:</strong> 9295
+            </p>
+          </div>
+        </div>
+
+        <div class="modal-actions modal-profile-actions">
+          <button class="btn-modal-danger" id="btn-delete-profile" onclick="deleteCurrentProfile()">
+            <span>🗑️ Eliminar Perfil</span>
+          </button>
+          <div class="modal-actions-right">
+            <button class="btn-modal-cancel" onclick="closeProfileModal()">Cancelar</button>
+            <button class="btn-modal-confirm" onclick="saveProfileFromModal()">
+              <span>Guardar Perfil</span>
+              <span class="btn-arrow">❯</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 2: AVISOS Y CONFIRMACIONES -->
+    <div class="modal-overlay" id="custom-modal">
+      <div class="modal-card">
+        <div class="modal-icon-glow">
+          <span id="modal-icon">🔗</span>
+        </div>
+        <h3 class="modal-title" id="modal-title">Consola no vinculada</h3>
+        <p class="modal-body" id="modal-message">
+          Este perfil no tiene claves de vinculación registradas.<br><br>
+          ¿Deseas ir ahora a la pestaña de Vinculación para emparejarla con el PIN de 8 dígitos?
+        </p>
+        <div class="modal-actions" id="modal-actions">
+          <button class="btn-modal-cancel" id="modal-btn-cancel" onclick="closeModal(false)">Cancelar</button>
+          <button class="btn-modal-confirm" id="modal-btn-confirm" onclick="closeModal(true)">
+            <span id="modal-btn-confirm-text">Aceptar</span>
+            <span class="btn-arrow">❯</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

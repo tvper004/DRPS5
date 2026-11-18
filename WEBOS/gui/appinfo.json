@@ -1,0 +1,15 @@
+{
+  "id": "com.drps5.remoteplay",
+  "version": "1.3.1",
+  "vendor": "DRPS5",
+  "type": "web",
+  "main": "index.html",
+  "title": "DRPS5 Remote Play (Personal)",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "resolution": "1920x1080",
+  "transparent": false,
+  "requiredMemory": 64,
+  "requiredACG": [],
+  "handlesRelaunch": true
+}

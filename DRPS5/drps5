@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# DRPS5 Launcher Script
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$DIR:$DIR/pyremoteplay:$PYTHONPATH"
+exec "$DIR/.venv/bin/python3" "$DIR/drps5.py" "$@"

@@ -1,0 +1,14 @@
+{
+  "id": "com.drps5.remoteplay",
+  "type": "native",
+  "main": "drps5",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "iconColor": "#0070D1",
+  "title": "DRPS5 Remote Play",
+  "appDescription": "DRPS5 PlayStation Remote Play Nativo para LG webOS",
+  "version": "2.0.15",
+  "vendor": "DRPS5",
+  "resolution": "1920x1080",
+  "requiredPermissions": [ "network.http", "network.https" ]
+}
