@@ -165,23 +165,84 @@ public final class Guard {{
     (pkg / "Guard.java").write_text(guard, encoding="utf-8")
 
 
+def make_pure_black_gamepad_master() -> Image.Image:
+    raw_src = WORKSPACE_DIR / "DRPS5" / "app_icon_1024.png"
+    if not raw_src.exists():
+        raw_src = WEBOS_ASSETS / "drps5_icon.png"
+    src_im = Image.open(raw_src).convert("RGBA").resize((1024, 1024), Image.Resampling.LANCZOS)
+    src_px = src_im.load()
+
+    clean = Image.new("RGB", (1024, 1024), (0, 0, 0))
+    dst_px = clean.load()
+    for y in range(1024):
+        dy = abs(y - 512) / 412.0
+        dy4 = dy * dy * dy * dy
+        if dy4 >= 1.0:
+            continue
+        for x in range(1024):
+            dx = abs(x - 512) / 412.0
+            d4 = dx * dx * dx * dx + dy4
+            if d4 >= 1.0:
+                continue
+            r, g, b, a = src_px[x, y]
+            if a < 32:
+                continue
+            # Pure monochrome luminance (no blue/other colors) + pure #000000 floor
+            lum = max(r, int(0.299 * r + 0.587 * g + 0.114 * b))
+            if d4 > 0.86:
+                lum = int(lum * (1.0 - (d4 - 0.86) / 0.14))
+            if lum <= 22:
+                continue
+            v = min(255, int((lum - 22) * 255 / 233))
+            dst_px[x, y] = (v, v, v)
+
+    # Crop around optical mass center (516, 526) with smooth radial fade into #000000
+    cx, cy, half = 516, 526, 430
+    cropped = Image.new("RGB", (half * 2, half * 2), (0, 0, 0))
+    cropped.paste(clean, (half - cx, half - cy))
+    cpx = cropped.load()
+    size = half * 2
+    for y in range(size):
+        ny = (y - half) / float(half)
+        for x in range(size):
+            nx = (x - half) / float(half)
+            dist = (nx * nx + ny * ny) ** 0.5
+            if dist >= 0.98:
+                cpx[x, y] = (0, 0, 0)
+            elif dist > 0.82:
+                r0, _, _ = cpx[x, y]
+                if r0 > 0:
+                    v = int(r0 * (0.98 - dist) / 0.16)
+                    cpx[x, y] = (v, v, v)
+    return cropped
+
+
 def prepare_assets_and_res(build_dir: Path):
     assets_dir = build_dir / "assets"
     devices_dir = assets_dir / "devices"
     devices_dir.mkdir(parents=True, exist_ok=True)
 
-    for fname in ("bg_main.png", "drps5_icon.png"):
-        src = WEBOS_ASSETS / fname
-        if src.exists():
-            shutil.copy2(src, assets_dir / fname)
+    bg_src = WEBOS_ASSETS / "bg_main.png"
+    if bg_src.exists():
+        shutil.copy2(bg_src, assets_dir / "bg_main.png")
 
     for dev in ("ps5.png", "ps4.png", "unknown.png", "dualsense.png", "ds4.png"):
         src = WEBOS_ASSETS / "devices" / dev
         if src.exists():
             shutil.copy2(src, devices_dir / dev)
 
-    res_drawable = build_dir / "res" / "drawable"
-    res_drawable.mkdir(parents=True, exist_ok=True)
+    res_drawable_xhdpi = build_dir / "res" / "drawable-xhdpi"
+    res_drawable_xhdpi.mkdir(parents=True, exist_ok=True)
+    res_drawable_xxxhdpi = build_dir / "res" / "drawable-xxxhdpi"
+    res_drawable_xxxhdpi.mkdir(parents=True, exist_ok=True)
+    res_mipmap_xhdpi = build_dir / "res" / "mipmap-xhdpi"
+    res_mipmap_xhdpi.mkdir(parents=True, exist_ok=True)
+    res_mipmap_xxhdpi = build_dir / "res" / "mipmap-xxhdpi"
+    res_mipmap_xxhdpi.mkdir(parents=True, exist_ok=True)
+    res_mipmap_xxxhdpi = build_dir / "res" / "mipmap-xxxhdpi"
+    res_mipmap_xxxhdpi.mkdir(parents=True, exist_ok=True)
+    res_mipmap_anydpi_v26 = build_dir / "res" / "mipmap-anydpi-v26"
+    res_mipmap_anydpi_v26.mkdir(parents=True, exist_ok=True)
     res_values = build_dir / "res" / "values"
     res_values.mkdir(parents=True, exist_ok=True)
 
@@ -195,17 +256,40 @@ def prepare_assets_and_res(build_dir: Path):
 """
     (res_values / "styles.xml").write_text(styles_xml, encoding="utf-8")
 
-    icon_src = WEBOS_ASSETS / "drps5_icon.png"
-    img_icon = Image.open(icon_src).convert("RGBA").resize((192, 192), Image.Resampling.LANCZOS)
-    img_icon.save(res_drawable / "ic_launcher.png", format="PNG")
+    master_pad = make_pure_black_gamepad_master()
 
-    banner = Image.new("RGBA", (320, 180), (11, 19, 41, 255))
-    draw = ImageDraw.Draw(banner)
-    draw.rectangle([0, 0, 320, 180], fill=(11, 19, 41, 255))
-    draw.line([0, 176, 320, 176], fill=(56, 189, 248, 255), width=4)
-    icon_sm = Image.open(icon_src).convert("RGBA").resize((112, 112), Image.Resampling.LANCZOS)
-    banner.paste(icon_sm, (104, 34), icon_sm)
-    banner.save(res_drawable / "tv_banner.png", format="PNG")
+    # In-app icon (512x512 crisp, pure black + centered monochrome gamepad)
+    master_pad.resize((512, 512), Image.Resampling.LANCZOS).save(assets_dir / "drps5_icon.png", format="PNG")
+
+    # Proper density-qualified mipmap launcher icons (pure #000000 edge-to-edge + large centered gamepad)
+    for folder, sz in ((res_mipmap_xhdpi, 96), (res_mipmap_xxhdpi, 144), (res_mipmap_xxxhdpi, 192)):
+        ic = Image.new("RGB", (sz, sz), (0, 0, 0))
+        pad_sz = int(round(sz * 0.90))
+        pad_im = master_pad.resize((pad_sz, pad_sz), Image.Resampling.LANCZOS)
+        ic.paste(pad_im, ((sz - pad_sz) // 2, (sz - pad_sz) // 2))
+        ic.save(folder / "ic_launcher.png", format="PNG")
+
+    # Adaptive icon foreground MUST be in mipmap-xxxhdpi (where 108dp == 432px!) so Android never shifts/clips it
+    fg_icon = Image.new("RGB", (432, 432), (0, 0, 0))
+    pad_fg = master_pad.resize((288, 288), Image.Resampling.LANCZOS)
+    fg_icon.paste(pad_fg, ((432 - 288) // 2, (432 - 288) // 2))
+    fg_icon.save(res_mipmap_xxxhdpi / "ic_launcher_fg.png", format="PNG")
+
+    adaptive_xml = """<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/black" />
+    <foreground android:drawable="@mipmap/ic_launcher_fg" />
+</adaptive-icon>
+"""
+    (res_mipmap_anydpi_v26 / "ic_launcher.xml").write_text(adaptive_xml, encoding="utf-8")
+
+    # Android TV / Stick Leanback banner in BOTH xhdpi (320x180) and xxxhdpi (640x360 HD):
+    # 100% pure #000000 black + large crisp centered gamepad
+    banner_hd = Image.new("RGB", (640, 360), (0, 0, 0))
+    pad_bhd = master_pad.resize((336, 336), Image.Resampling.LANCZOS)
+    banner_hd.paste(pad_bhd, ((640 - 336) // 2, (360 - 336) // 2))
+    banner_hd.save(res_drawable_xxxhdpi / "tv_banner.png", format="PNG")
+    banner_hd.resize((320, 180), Image.Resampling.LANCZOS).save(res_drawable_xhdpi / "tv_banner.png", format="PNG")
 
 
 def write_manifest(manifest_path: Path, is_personal: bool):
@@ -213,8 +297,8 @@ def write_manifest(manifest_path: Path, is_personal: bool):
     manifest = f"""<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.drps5.remoteplay"
-    android:versionCode="200"
-    android:versionName="2.0.0">
+    android:versionCode="203"
+    android:versionName="2.0.17">
 
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="34" />
 
@@ -232,7 +316,8 @@ def write_manifest(manifest_path: Path, is_personal: bool):
 
     <application
         android:label="{app_name}"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:banner="@drawable/tv_banner"
         android:theme="@style/AppTheme"
         android:hardwareAccelerated="true"
@@ -242,6 +327,10 @@ def write_manifest(manifest_path: Path, is_personal: bool):
 
         <activity
             android:name=".MainActivity"
+            android:label="{app_name}"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher"
+            android:banner="@drawable/tv_banner"
             android:exported="true"
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode">

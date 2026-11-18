@@ -1,6 +1,8 @@
 package com.drps5.remoteplay;
 
+import android.app.ActivityManager;
 import android.content.Context;
+import android.os.Build;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -73,6 +75,7 @@ public final class ConfigStore {
     }
 
     private final File configFile;
+    public final boolean lowResourceDevice;
     public String resolution = "1080p";      // "720p", "1080p", "1440p" (2K), "2160p" (4K)
     public String upscaleMode = "auto";      // "auto", "cas_high", "cas_med", "direct"
     public int fps = 60;                     // 30 or 60
@@ -92,7 +95,39 @@ public final class ConfigStore {
 
     public ConfigStore(Context ctx) {
         this.configFile = new File(ctx.getFilesDir(), "drps5_v2_config.json");
+        this.lowResourceDevice = detectLowResourceDevice(ctx);
         load();
+    }
+
+    private static boolean detectLowResourceDevice(Context ctx) {
+        try {
+            ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                if (am.isLowRamDevice()) return true;
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                if (mi.totalMem > 0 && mi.totalMem <= 2_800L * 1024L * 1024L) {
+                    return true;
+                }
+            }
+            String hw = (Build.BOARD + " " + Build.HARDWARE + " " + Build.MODEL).toLowerCase();
+            if (hw.contains("sun50iw") || hw.contains("cupid") || hw.contains("h313")
+                    || hw.contains("h616") || hw.contains("h618") || hw.contains("rk322")) {
+                return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    public boolean shouldUseDirectZeroCopy() {
+        if ("direct".equals(upscaleMode)) return true;
+        if ("auto".equals(upscaleMode)) {
+            if (lowResourceDevice) return true;
+            if ("720p".equalsIgnoreCase(resolution) || "1080p".equalsIgnoreCase(resolution)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void load() {
@@ -100,6 +135,10 @@ public final class ConfigStore {
         String raw = readText(configFile);
         if (raw == null || raw.trim().isEmpty()) {
             seedFromGuard();
+            if (lowResourceDevice) {
+                resolution = "720p";
+                upscaleMode = "direct";
+            }
             save();
             return;
         }

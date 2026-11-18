@@ -52,7 +52,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
-    private static final String APP_VERSION = "2.0.0";
+    private static final String APP_VERSION = "2.0.17";
 
     private ConfigStore cfg;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -101,8 +101,22 @@ public final class MainActivity extends Activity {
     private long lastBackPressMs = 0;
 
     // Gamepad state
+    private static final int ID_TAB_CONSOLES = 0x7F010001;
+    private static final int ID_TAB_SETTINGS = 0x7F010002;
+    private static final int ID_FIRST_CONSOLE_CARD = 0x7F010010;
+    private static final int ID_CAT_TILE_BASE = 0x7F010020;
+
     private boolean gpShareDown = false;
     private boolean gpOptionsDown = false;
+    private boolean l2TriggerActive = false;
+    private boolean r2TriggerActive = false;
+    private boolean hatUpActive = false;
+    private boolean hatDownActive = false;
+    private boolean hatLeftActive = false;
+    private boolean hatRightActive = false;
+    private long lastStickNavMs = 0L;
+    private boolean suppressAutoFocusSwitch = false;
+    private boolean topBarFocused = false;
 
     private final Runnable clockTick = new Runnable() {
         @Override
@@ -363,7 +377,7 @@ public final class MainActivity extends Activity {
         View h1 = new View(this); hintBar.addView(h1, new LinearLayout.LayoutParams(WebOSTheme.dp(this, 8), 1));
         hintBar.addView(WebOSTheme.makeHintChip(this, "◯", WebOSTheme.COL_PS_CIRCLE, "Atras / Menu"));
         View h2 = new View(this); hintBar.addView(h2, new LinearLayout.LayoutParams(WebOSTheme.dp(this, 8), 1));
-        hintBar.addView(WebOSTheme.makeHintChip(this, "L1/R1", WebOSTheme.COL_PS_TRIANGLE, "Pestañas"));
+        hintBar.addView(WebOSTheme.makeHintChip(this, "↑ / L1·R1", WebOSTheme.COL_PS_TRIANGLE, "Pestañas"));
         homeRoot.addView(hintBar, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -373,32 +387,72 @@ public final class MainActivity extends Activity {
 
     private TextView makeTabPill(String label, int tabIdx) {
         TextView tv = new TextView(this);
+        tv.setId(tabIdx == 0 ? ID_TAB_CONSOLES : ID_TAB_SETTINGS);
         tv.setText(label);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         tv.setTypeface(Typeface.DEFAULT_BOLD);
         tv.setPadding(WebOSTheme.dp(this, 18), WebOSTheme.dp(this, 8), WebOSTheme.dp(this, 18), WebOSTheme.dp(this, 8));
         tv.setFocusable(true);
         tv.setClickable(true);
-        tv.setOnClickListener(v -> switchTab(tabIdx));
+        if (tabIdx == 0) {
+            tv.setNextFocusRightId(ID_TAB_SETTINGS);
+            tv.setNextFocusDownId(ID_FIRST_CONSOLE_CARD);
+        } else {
+            tv.setNextFocusLeftId(ID_TAB_CONSOLES);
+            tv.setNextFocusDownId(ID_CAT_TILE_BASE);
+        }
+        tv.setOnFocusChangeListener((v, hasFocus) -> {
+            styleTabPill(tv, activeTab == tabIdx, hasFocus);
+            v.animate().scaleX(hasFocus ? 1.06f : 1.0f).scaleY(hasFocus ? 1.06f : 1.0f).setDuration(90).start();
+            if (hasFocus && !suppressAutoFocusSwitch && topBarFocused && activeTab != tabIdx) {
+                switchTab(tabIdx, true);
+            }
+            topBarFocused = (tabConsolesBtn != null && tabConsolesBtn.hasFocus())
+                || (tabSettingsBtn != null && tabSettingsBtn.hasFocus());
+        });
+        tv.setOnClickListener(v -> switchTab(tabIdx, false));
         return tv;
     }
 
     private void switchTab(int tabIdx) {
+        switchTab(tabIdx, false);
+    }
+
+    private void switchTab(int tabIdx, boolean keepTabFocus) {
         activeTab = tabIdx;
         consolesPage.setVisibility(tabIdx == 0 ? View.VISIBLE : View.GONE);
         settingsPage.setVisibility(tabIdx == 1 ? View.VISIBLE : View.GONE);
 
-        styleTabPill(tabConsolesBtn, tabIdx == 0);
-        styleTabPill(tabSettingsBtn, tabIdx == 1);
+        styleTabPill(tabConsolesBtn, tabIdx == 0, tabConsolesBtn.hasFocus());
+        styleTabPill(tabSettingsBtn, tabIdx == 1, tabSettingsBtn.hasFocus());
+        tabSettingsBtn.setNextFocusDownId(ID_CAT_TILE_BASE + activeSettingsCat);
 
         if (tabIdx == 0) {
-            focusInitialConsole();
+            if (!keepTabFocus) {
+                focusInitialConsole();
+            }
         } else {
             refreshSettingsUi();
+            if (keepTabFocus) {
+                tabSettingsBtn.requestFocus();
+            } else if (settingsCatRow.getChildCount() > activeSettingsCat) {
+                settingsCatRow.getChildAt(activeSettingsCat).requestFocus();
+            }
         }
     }
 
-    private void styleTabPill(TextView tv, boolean active) {
+    private void styleTabPill(TextView tv, boolean active, boolean focused) {
+        if (focused) {
+            tv.setTextColor(WebOSTheme.COL_ON_FROST);
+            tv.setBackground(WebOSTheme.makeCardDrawable(
+                this,
+                0xFFFFFFFF,
+                WebOSTheme.COL_ACCENT_HI,
+                50,
+                2
+            ));
+            return;
+        }
         tv.setTextColor(active ? WebOSTheme.COL_ON_FROST : WebOSTheme.COL_SUBTLE);
         tv.setBackground(WebOSTheme.makeCardDrawable(
             this,
@@ -478,11 +532,17 @@ public final class MainActivity extends Activity {
             if (act != null) selectedConsoleId = act.id;
         }
 
-        for (ConfigStore.ConsoleProfile cp : cfg.profiles) {
+        for (int i = 0; i < cfg.profiles.size(); i++) {
+            ConfigStore.ConsoleProfile cp = cfg.profiles.get(i);
             View card = makeConsoleCard(cp);
+            if (i == 0) card.setId(ID_FIRST_CONSOLE_CARD);
+            card.setNextFocusUpId(ID_TAB_CONSOLES);
             consoleCardsRow.addView(card);
         }
-        consoleCardsRow.addView(makeAddConsoleCard());
+        View addCard = makeAddConsoleCard();
+        if (cfg.profiles.isEmpty()) addCard.setId(ID_FIRST_CONSOLE_CARD);
+        addCard.setNextFocusUpId(ID_TAB_CONSOLES);
+        consoleCardsRow.addView(addCard);
 
         updateConsoleDetailPanel();
     }
@@ -691,6 +751,8 @@ public final class MainActivity extends Activity {
             final int idx = i;
             boolean active = (i == activeSettingsCat);
             TextView tile = new TextView(this);
+            tile.setId(ID_CAT_TILE_BASE + i);
+            tile.setNextFocusUpId(ID_TAB_SETTINGS);
             tile.setText(cats[i]);
             tile.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
             tile.setTypeface(Typeface.DEFAULT_BOLD);
@@ -704,12 +766,24 @@ public final class MainActivity extends Activity {
                 tile.setTextColor((f || idx == activeSettingsCat) ? WebOSTheme.COL_ON_FROST : WebOSTheme.COL_TEXT);
                 if (f && activeSettingsCat != idx) {
                     activeSettingsCat = idx;
+                    tabSettingsBtn.setNextFocusDownId(ID_CAT_TILE_BASE + activeSettingsCat);
+                    for (int k = 0; k < settingsCatRow.getChildCount(); k++) {
+                        View ch = settingsCatRow.getChildAt(k);
+                        ch.setSelected(k == activeSettingsCat);
+                        if (ch instanceof TextView && k != idx) {
+                            ((TextView) ch).setTextColor(WebOSTheme.COL_TEXT);
+                        }
+                    }
                     populateSettingsRows();
                 }
             });
             tile.setOnClickListener(v -> {
                 activeSettingsCat = idx;
+                tabSettingsBtn.setNextFocusDownId(ID_CAT_TILE_BASE + activeSettingsCat);
                 refreshSettingsUi();
+                if (settingsCatRow.getChildCount() > idx) {
+                    settingsCatRow.getChildAt(idx).requestFocus();
+                }
             });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -720,10 +794,36 @@ public final class MainActivity extends Activity {
     }
 
     private void populateSettingsRows() {
-        settingsRowsContainer.removeAllViews();
-        logConsoleView = null;
+        int restoreFocusIdx = -1;
+        for (int i = 0; i < settingsRowsContainer.getChildCount(); i++) {
+            View ch = settingsRowsContainer.getChildAt(i);
+            if (ch != null && ch.hasFocus()) {
+                restoreFocusIdx = i;
+                break;
+            }
+        }
+        suppressAutoFocusSwitch = true;
+        try {
+            if (restoreFocusIdx >= 0 && settingsCatRow.getChildCount() > activeSettingsCat) {
+                settingsCatRow.getChildAt(activeSettingsCat).requestFocus();
+            }
+            settingsRowsContainer.removeAllViews();
+            logConsoleView = null;
 
         if (activeSettingsCat == 0) {
+            boolean isStickPreset = "720p".equals(cfg.resolution) && cfg.fps == 60 && "direct".equals(cfg.upscaleMode);
+            addSettingRow("Perfil TV Stick / Bajos Recursos",
+                cfg.lowResourceDevice ? "Hardware ligero detectado: usa 720p 60FPS Directo Zero-Copy sin carga GPU" : "Activa en un toque 720p 60FPS Directo Zero-Copy para TV Sticks",
+                isStickPreset ? "Activo (720p 0-Copy)" : "Aplicar", v -> {
+                cfg.resolution = "720p";
+                cfg.fps = 60;
+                cfg.upscaleMode = "direct";
+                cfg.codec = "hevc";
+                cfg.save();
+                populateSettingsRows();
+                updateConsoleDetailPanel();
+                Toast.makeText(this, "Perfil TV Stick 720p 60FPS Zero-Copy activado", Toast.LENGTH_SHORT).show();
+            });
             addSettingRow("Resolucion / Reescalado", "PS5 envia hasta 1080p; 2K/4K usan reescalado GPU", cfg.getResolutionLabel(), v -> {
                 String[] opts = { "720p", "1080p", "1440p", "2160p" };
                 cfg.resolution = nextInCycle(opts, cfg.resolution);
@@ -844,7 +944,20 @@ public final class MainActivity extends Activity {
             addSettingRow("DRPS5 Version", "Interfaz nativa Android (WebOS V2 style)", APP_VERSION + " (" + (Guard.IS_PERSONAL ? "Personal" : "Publica") + ")", null);
             addSettingRow("Dispositivo", Build.MANUFACTURER + " " + Build.MODEL, "Android " + Build.VERSION.RELEASE + " • " + Math.round(hz) + " Hz", null);
             addSettingRow("Red Local", "Direccion IPv4 actual", getLocalIpAddress(), null);
-            addSettingRow("Pipeline de Video", "MediaCodec Hardware + OpenGL ES CAS 5-Tap", "2K / 4K @ 60FPS", null);
+            addSettingRow("Pipeline de Video", "MediaCodec Hardware + Directo Zero-Copy / CAS 5-Tap", cfg.lowResourceDevice ? "TV Stick Zero-Copy" : "2K / 4K @ 60FPS", null);
+        }
+
+        if (settingsRowsContainer.getChildCount() > 0) {
+            settingsRowsContainer.getChildAt(0).setNextFocusUpId(ID_CAT_TILE_BASE + activeSettingsCat);
+        }
+        if (restoreFocusIdx >= 0 && restoreFocusIdx < settingsRowsContainer.getChildCount()) {
+            View target = settingsRowsContainer.getChildAt(restoreFocusIdx);
+            if (target != null && target.isFocusable()) {
+                target.requestFocus();
+            }
+        }
+        } finally {
+            suppressAutoFocusSwitch = false;
         }
     }
 
@@ -1089,7 +1202,7 @@ public final class MainActivity extends Activity {
                 String[] opts = { "auto", "cas_high", "cas_med", "direct" };
                 cfg.upscaleMode = nextInCycle(opts, cfg.upscaleMode);
                 cfg.save();
-                if (upscaleRenderer != null && !"direct".equals(cfg.upscaleMode)) {
+                if (upscaleRenderer != null) {
                     upscaleRenderer.configure(cfg.resolution, cfg.upscaleMode);
                 }
                 updateStreamOverlayInfo();
@@ -1190,7 +1303,8 @@ public final class MainActivity extends Activity {
             directSurfaceView = null;
         }
 
-        if ("direct".equals(cfg.upscaleMode)) {
+        if (cfg.shouldUseDirectZeroCopy()) {
+            AppLogger.i("GPU", "Usando SurfaceView Directo Zero-Copy (res=" + cfg.resolution + ", mode=" + cfg.upscaleMode + ", lowRes=" + cfg.lowResourceDevice + ")");
             directSurfaceView = new SurfaceView(this);
             streamContainer.addView(directSurfaceView, 0, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1268,6 +1382,14 @@ public final class MainActivity extends Activity {
 
     private void stopStreamSession() {
         streaming = false;
+        l2TriggerActive = false;
+        r2TriggerActive = false;
+        hatUpActive = false;
+        hatDownActive = false;
+        hatLeftActive = false;
+        hatRightActive = false;
+        gpShareDown = false;
+        gpOptionsDown = false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (streamClient != null) {
             streamClient.stop();
@@ -1318,50 +1440,105 @@ public final class MainActivity extends Activity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         int code = event.getKeyCode();
-        boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
+        int action = event.getAction();
+        if (action != KeyEvent.ACTION_DOWN && action != KeyEvent.ACTION_UP) {
+            return super.dispatchKeyEvent(event);
+        }
+        boolean down = (action == KeyEvent.ACTION_DOWN);
+        InputDevice dev = event.getDevice();
+        boolean rawSony = isRawSonyHidLayout(dev);
+        int psBtn = mapEventToPsButton(event, rawSony);
+        int confirmBtn = cfg.circleConfirm ? 0x89 : 0x88;
+        int cancelBtn = cfg.circleConfirm ? 0x88 : 0x89;
 
         if (!streaming) {
-            if (down && code == KeyEvent.KEYCODE_BUTTON_L1) {
-                switchTab(0);
+            if (down && event.getRepeatCount() == 0) {
+                if (psBtn == 0x84 || code == KeyEvent.KEYCODE_BUTTON_L1) {
+                    switchTab(0, false);
+                    return true;
+                }
+                if (psBtn == 0x85 || code == KeyEvent.KEYCODE_BUTTON_R1) {
+                    switchTab(1, false);
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_DPAD_UP || psBtn == 0x80) {
+                    if (handleExplicitUpToTabs()) return true;
+                }
+            }
+            if (rawSony && psBtn != -1) {
+                if (psBtn >= 0x80 && psBtn <= 0x83) {
+                    return super.dispatchKeyEvent(event);
+                }
+                if (down && event.getRepeatCount() == 0) {
+                    if (psBtn == confirmBtn) {
+                        performFocusedClick();
+                    } else if (psBtn == cancelBtn) {
+                        handleMenuBack();
+                    }
+                }
                 return true;
             }
-            if (down && code == KeyEvent.KEYCODE_BUTTON_R1) {
-                switchTab(1);
+            if (psBtn == cancelBtn && code != KeyEvent.KEYCODE_BACK) {
+                if (down && event.getRepeatCount() == 0) {
+                    handleMenuBack();
+                }
+                return true;
+            }
+            if (psBtn == confirmBtn && code != KeyEvent.KEYCODE_DPAD_CENTER && code != KeyEvent.KEYCODE_ENTER && code != KeyEvent.KEYCODE_BUTTON_A) {
+                if (down && event.getRepeatCount() == 0) {
+                    performFocusedClick();
+                }
                 return true;
             }
             return super.dispatchKeyEvent(event);
         }
 
         if (streamOverlayMenu.isMenuOpen()) {
-            if (down && (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_BUTTON_B)) {
+            if (rawSony && psBtn != -1) {
+                if (psBtn >= 0x80 && psBtn <= 0x83) {
+                    return super.dispatchKeyEvent(event);
+                }
+                if (down && event.getRepeatCount() == 0) {
+                    if (psBtn == confirmBtn) {
+                        performFocusedClick();
+                    } else if (psBtn == cancelBtn) {
+                        streamOverlayMenu.hideMenu();
+                    }
+                }
+                return true;
+            }
+            if (down && (code == KeyEvent.KEYCODE_BACK || psBtn == cancelBtn)) {
                 streamOverlayMenu.hideMenu();
                 return true;
             }
             return super.dispatchKeyEvent(event);
         }
 
-        if (code == KeyEvent.KEYCODE_BUTTON_SELECT) gpShareDown = down;
-        if (code == KeyEvent.KEYCODE_BUTTON_START) gpOptionsDown = down;
+        if (psBtn == 0x8D || code == KeyEvent.KEYCODE_BUTTON_SELECT) gpShareDown = down;
+        if (psBtn == 0x8C || code == KeyEvent.KEYCODE_BUTTON_START) gpOptionsDown = down;
 
-        if (down && ((gpShareDown && gpOptionsDown) || code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_BUTTON_MODE)) {
+        if (down && ((gpShareDown && gpOptionsDown) || code == KeyEvent.KEYCODE_MENU)) {
+            gpShareDown = false;
+            gpOptionsDown = false;
             toggleStreamOverlayMenu();
             return true;
         }
 
-        if (down && code == KeyEvent.KEYCODE_BACK) {
-            long now = SystemClock.uptimeMillis();
-            if (now - lastBackPressMs < 1500) {
-                toggleStreamOverlayMenu();
-            } else {
-                lastBackPressMs = now;
-                Toast.makeText(this, "Pulsa Atras de nuevo para abrir el menu", Toast.LENGTH_SHORT).show();
+        if (code == KeyEvent.KEYCODE_BACK && psBtn == -1) {
+            if (down) {
+                long now = SystemClock.uptimeMillis();
+                if (now - lastBackPressMs < 1500) {
+                    toggleStreamOverlayMenu();
+                } else {
+                    lastBackPressMs = now;
+                    Toast.makeText(this, "Pulsa Atras de nuevo para abrir el menu", Toast.LENGTH_SHORT).show();
+                }
             }
             return true;
         }
 
-        int psBtn = mapKeyToPsButton(code);
         if (psBtn != -1 && streamClient != null) {
-            if (event.getRepeatCount() == 0) {
+            if (!down || event.getRepeatCount() == 0) {
                 streamClient.sendButtonEvent(psBtn, down);
             }
             return true;
@@ -1369,29 +1546,253 @@ public final class MainActivity extends Activity {
         return super.dispatchKeyEvent(event);
     }
 
+    private boolean handleExplicitUpToTabs() {
+        View focused = getCurrentFocus();
+        if (focused == null) return false;
+        if (focused.getParent() == consoleCardsRow) {
+            tabConsolesBtn.requestFocus();
+            return true;
+        }
+        if (focused.getParent() == settingsCatRow) {
+            tabSettingsBtn.requestFocus();
+            return true;
+        }
+        if (focused.getParent() == settingsRowsContainer && settingsRowsContainer.indexOfChild(focused) == 0) {
+            if (settingsCatRow.getChildCount() > activeSettingsCat) {
+                settingsCatRow.getChildAt(activeSettingsCat).requestFocus();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void performFocusedClick() {
+        View focused = getCurrentFocus();
+        if (focused != null && focused.isClickable()) {
+            focused.performClick();
+        }
+    }
+
+    private void handleMenuBack() {
+        if (activeTab == 1) {
+            switchTab(0, false);
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (now - lastBackPressMs < 1800) {
+            finish();
+        } else {
+            lastBackPressMs = now;
+            Toast.makeText(this, "Pulsa Atras de nuevo para salir", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void navigateUiDirection(int focusDir) {
+        if (focusDir == View.FOCUS_UP && !streaming && handleExplicitUpToTabs()) {
+            return;
+        }
+        View cur = getCurrentFocus();
+        if (cur != null) {
+            View next = cur.focusSearch(focusDir);
+            if (next != null) {
+                next.requestFocus();
+            }
+        } else if (streamOverlayMenu != null && streamOverlayMenu.isMenuOpen()) {
+            streamOverlayMenu.showMenu();
+        } else {
+            focusInitialConsole();
+        }
+    }
+
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent ev) {
-        if (streaming && !streamOverlayMenu.isMenuOpen() && streamClient != null &&
-            (ev.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK &&
+        if ((ev.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK &&
             ev.getAction() == MotionEvent.ACTION_MOVE) {
+            InputDevice dev = ev.getDevice();
+            boolean rawSony = isRawSonyHidLayout(dev);
+
             float lx = applyDeadzone(ev.getAxisValue(MotionEvent.AXIS_X));
             float ly = applyDeadzone(ev.getAxisValue(MotionEvent.AXIS_Y));
-            float rx = applyDeadzone(ev.getAxisValue(MotionEvent.AXIS_Z));
-            float ry = applyDeadzone(ev.getAxisValue(MotionEvent.AXIS_RZ));
-            streamClient.setSticks(
-                (short) (lx * 32767f), (short) (ly * 32767f),
-                (short) (rx * 32767f), (short) (ry * 32767f)
-            );
-            float lt = ev.getAxisValue(MotionEvent.AXIS_LTRIGGER);
-            float rt = ev.getAxisValue(MotionEvent.AXIS_RTRIGGER);
-            streamClient.sendButtonEvent(0x86, lt > 0.25f);
-            streamClient.sendButtonEvent(0x87, rt > 0.25f);
+            float rx;
+            float ry;
+            float lt;
+            float rt;
+
+            if (rawSony) {
+                rx = applyDeadzone(ev.getAxisValue(MotionEvent.AXIS_Z));
+                ry = applyDeadzone(ev.getAxisValue(MotionEvent.AXIS_RZ));
+                lt = normalizeRawTriggerAxis(dev, MotionEvent.AXIS_RX, ev.getAxisValue(MotionEvent.AXIS_RX));
+                rt = normalizeRawTriggerAxis(dev, MotionEvent.AXIS_RY, ev.getAxisValue(MotionEvent.AXIS_RY));
+            } else {
+                boolean hasZ = dev != null && dev.getMotionRange(MotionEvent.AXIS_Z) != null;
+                boolean hasRZ = dev != null && dev.getMotionRange(MotionEvent.AXIS_RZ) != null;
+                rx = applyDeadzone(ev.getAxisValue(hasZ ? MotionEvent.AXIS_Z : MotionEvent.AXIS_RX));
+                ry = applyDeadzone(ev.getAxisValue(hasRZ ? MotionEvent.AXIS_RZ : MotionEvent.AXIS_RY));
+                lt = Math.max(ev.getAxisValue(MotionEvent.AXIS_LTRIGGER), ev.getAxisValue(MotionEvent.AXIS_BRAKE));
+                rt = Math.max(ev.getAxisValue(MotionEvent.AXIS_RTRIGGER), ev.getAxisValue(MotionEvent.AXIS_GAS));
+            }
+
+            float hatX = ev.getAxisValue(MotionEvent.AXIS_HAT_X);
+            float hatY = ev.getAxisValue(MotionEvent.AXIS_HAT_Y);
+            boolean hLeft = hatX < -0.5f;
+            boolean hRight = hatX > 0.5f;
+            boolean hUp = hatY < -0.5f;
+            boolean hDown = hatY > 0.5f;
+
+            if (streaming && !streamOverlayMenu.isMenuOpen() && streamClient != null) {
+                streamClient.setSticks(
+                    (short) Math.max(-32767, Math.min(32767, (int) (lx * 32767f))),
+                    (short) Math.max(-32767, Math.min(32767, (int) (ly * 32767f))),
+                    (short) Math.max(-32767, Math.min(32767, (int) (rx * 32767f))),
+                    (short) Math.max(-32767, Math.min(32767, (int) (ry * 32767f)))
+                );
+
+                if (lt > 0.30f && !l2TriggerActive) {
+                    l2TriggerActive = true;
+                    streamClient.sendButtonEvent(0x86, true);
+                } else if (lt < 0.15f && l2TriggerActive) {
+                    l2TriggerActive = false;
+                    streamClient.sendButtonEvent(0x86, false);
+                }
+
+                if (rt > 0.30f && !r2TriggerActive) {
+                    r2TriggerActive = true;
+                    streamClient.sendButtonEvent(0x87, true);
+                } else if (rt < 0.15f && r2TriggerActive) {
+                    r2TriggerActive = false;
+                    streamClient.sendButtonEvent(0x87, false);
+                }
+
+                if (hUp != hatUpActive) {
+                    hatUpActive = hUp;
+                    streamClient.sendButtonEvent(0x80, hUp);
+                }
+                if (hDown != hatDownActive) {
+                    hatDownActive = hDown;
+                    streamClient.sendButtonEvent(0x81, hDown);
+                }
+                if (hLeft != hatLeftActive) {
+                    hatLeftActive = hLeft;
+                    streamClient.sendButtonEvent(0x82, hLeft);
+                }
+                if (hRight != hatRightActive) {
+                    hatRightActive = hRight;
+                    streamClient.sendButtonEvent(0x83, hRight);
+                }
+                return true;
+            }
+
+            // Menu & Overlay D-Pad HAT + Left Stick navigation
+            if (hUp != hatUpActive) {
+                hatUpActive = hUp;
+                if (hUp) navigateUiDirection(View.FOCUS_UP);
+            }
+            if (hDown != hatDownActive) {
+                hatDownActive = hDown;
+                if (hDown) navigateUiDirection(View.FOCUS_DOWN);
+            }
+            if (hLeft != hatLeftActive) {
+                hatLeftActive = hLeft;
+                if (hLeft) navigateUiDirection(View.FOCUS_LEFT);
+            }
+            if (hRight != hatRightActive) {
+                hatRightActive = hRight;
+                if (hRight) navigateUiDirection(View.FOCUS_RIGHT);
+            }
+
+            long now = SystemClock.uptimeMillis();
+            if (now - lastStickNavMs > 210) {
+                if (ly < -0.65f) {
+                    lastStickNavMs = now;
+                    navigateUiDirection(View.FOCUS_UP);
+                } else if (ly > 0.65f) {
+                    lastStickNavMs = now;
+                    navigateUiDirection(View.FOCUS_DOWN);
+                } else if (lx < -0.65f) {
+                    lastStickNavMs = now;
+                    navigateUiDirection(View.FOCUS_LEFT);
+                } else if (lx > 0.65f) {
+                    lastStickNavMs = now;
+                    navigateUiDirection(View.FOCUS_RIGHT);
+                }
+            }
             return true;
         }
         return super.dispatchGenericMotionEvent(ev);
     }
 
-    private int mapKeyToPsButton(int keyCode) {
+    private static boolean isRawSonyHidLayout(InputDevice dev) {
+        if (dev == null) return false;
+        if (dev.getVendorId() != 0x054c) return false;
+        try {
+            boolean[] hasBtnC = dev.hasKeys(KeyEvent.KEYCODE_BUTTON_C);
+            if (hasBtnC != null && hasBtnC.length > 0 && hasBtnC[0]) {
+                return true;
+            }
+        } catch (Throwable ignored) {}
+        return dev.getMotionRange(MotionEvent.AXIS_LTRIGGER) == null
+            && dev.getMotionRange(MotionEvent.AXIS_BRAKE) == null;
+    }
+
+    private static float normalizeRawTriggerAxis(InputDevice dev, int axis, float val) {
+        if (dev != null) {
+            InputDevice.MotionRange r = dev.getMotionRange(axis);
+            if (r != null && r.getMin() < -0.1f) {
+                if (val == 0f) return 0f; // untouched initial state before first pull on some BT stacks
+                return Math.max(0f, Math.min(1f, (val + 1f) * 0.5f));
+            }
+        }
+        return Math.max(0f, Math.min(1f, val));
+    }
+
+    private int mapEventToPsButton(KeyEvent event, boolean rawSony) {
+        int keyCode = event.getKeyCode();
+        int sc = event.getScanCode();
+
+        if (rawSony) {
+            switch (keyCode) {
+                case KeyEvent.KEYCODE_DPAD_UP:       return 0x80;
+                case KeyEvent.KEYCODE_DPAD_DOWN:     return 0x81;
+                case KeyEvent.KEYCODE_DPAD_LEFT:     return 0x82;
+                case KeyEvent.KEYCODE_DPAD_RIGHT:    return 0x83;
+                case KeyEvent.KEYCODE_DPAD_CENTER:
+                case KeyEvent.KEYCODE_ENTER:         return cfg.circleConfirm ? 0x89 : 0x88;
+                case KeyEvent.KEYCODE_BUTTON_B:      return cfg.circleConfirm ? 0x89 : 0x88; // Raw Cross
+                case KeyEvent.KEYCODE_BUTTON_C:      return cfg.circleConfirm ? 0x88 : 0x89; // Raw Circle
+                case KeyEvent.KEYCODE_BUTTON_A:      return 0x8A; // Raw Square
+                case KeyEvent.KEYCODE_BUTTON_X:      return 0x8B; // Raw Triangle
+                case KeyEvent.KEYCODE_BUTTON_Y:      return 0x84; // Raw L1
+                case KeyEvent.KEYCODE_BUTTON_Z:      return 0x85; // Raw R1
+                case KeyEvent.KEYCODE_BUTTON_L1:     return 0x86; // Raw L2
+                case KeyEvent.KEYCODE_BUTTON_R1:     return 0x87; // Raw R2
+                case KeyEvent.KEYCODE_BUTTON_L2:     return 0x8D; // Raw Share/Create
+                case KeyEvent.KEYCODE_BUTTON_R2:     return 0x8C; // Raw Options
+                case KeyEvent.KEYCODE_BUTTON_SELECT: return 0x8F; // Raw L3
+                case KeyEvent.KEYCODE_BUTTON_START:  return 0x90; // Raw R3
+                case KeyEvent.KEYCODE_BUTTON_MODE:   return 0x8E; // Raw PS
+                case KeyEvent.KEYCODE_BUTTON_THUMBL:
+                case KeyEvent.KEYCODE_BUTTON_1:      return 0x91; // Raw Touchpad
+                default: break;
+            }
+            switch (sc) {
+                case 304: return 0x8A; // Square
+                case 305: return cfg.circleConfirm ? 0x89 : 0x88; // Cross
+                case 306: return cfg.circleConfirm ? 0x88 : 0x89; // Circle
+                case 307: return 0x8B; // Triangle
+                case 308: return 0x84; // L1
+                case 309: return 0x85; // R1
+                case 310: return 0x86; // L2
+                case 311: return 0x87; // R2
+                case 312: return 0x8D; // Share
+                case 313: return 0x8C; // Options
+                case 314: return 0x8F; // L3
+                case 315: return 0x90; // R3
+                case 316: return 0x8E; // PS
+                case 317: return 0x91; // Touchpad
+                default:  return -1;
+            }
+        }
+
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP:       return 0x80;
             case KeyEvent.KEYCODE_DPAD_DOWN:     return 0x81;
@@ -1402,7 +1803,8 @@ public final class MainActivity extends Activity {
             case KeyEvent.KEYCODE_BUTTON_L2:     return 0x86;
             case KeyEvent.KEYCODE_BUTTON_R2:     return 0x87;
             case KeyEvent.KEYCODE_BUTTON_A:
-            case KeyEvent.KEYCODE_DPAD_CENTER:   return cfg.circleConfirm ? 0x89 : 0x88;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:         return cfg.circleConfirm ? 0x89 : 0x88;
             case KeyEvent.KEYCODE_BUTTON_B:      return cfg.circleConfirm ? 0x88 : 0x89;
             case KeyEvent.KEYCODE_BUTTON_X:      return 0x8A;
             case KeyEvent.KEYCODE_BUTTON_Y:      return 0x8B;
@@ -1411,7 +1813,26 @@ public final class MainActivity extends Activity {
             case KeyEvent.KEYCODE_BUTTON_MODE:   return 0x8E;
             case KeyEvent.KEYCODE_BUTTON_THUMBL: return 0x8F;
             case KeyEvent.KEYCODE_BUTTON_THUMBR: return 0x90;
-            default: return -1;
+            case KeyEvent.KEYCODE_BUTTON_1:
+            case KeyEvent.KEYCODE_BUTTON_C:      return 0x91;
+            default: break;
+        }
+
+        switch (sc) {
+            case 304: return cfg.circleConfirm ? 0x89 : 0x88; // BTN_SOUTH -> Cross
+            case 305: return cfg.circleConfirm ? 0x88 : 0x89; // BTN_EAST -> Circle
+            case 307: return 0x8A; // Square
+            case 308: return 0x8B; // Triangle
+            case 310: return 0x84; // L1
+            case 311: return 0x85; // R1
+            case 312: return 0x86; // L2
+            case 313: return 0x87; // R2
+            case 314: return 0x8D; // Share
+            case 315: return 0x8C; // Options
+            case 316: return 0x8E; // PS
+            case 317: return 0x8F; // L3
+            case 318: return 0x90; // R3
+            default:  return -1;
         }
     }
 

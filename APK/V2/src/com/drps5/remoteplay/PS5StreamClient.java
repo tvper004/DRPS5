@@ -96,6 +96,22 @@ public final class PS5StreamClient {
     private int tsn = 1;
     private volatile boolean cookieAcked = false;
     private byte[] videoHeader = new byte[0];
+    private long remoteKeyPosHigh = 0L;
+    private long lastRemoteKeyPosLow = -1L;
+
+    private synchronized long resolveRemoteKeyPos(long keyPosLow) {
+        if (lastRemoteKeyPosLow >= 0) {
+            if (keyPosLow < 0x40000000L && lastRemoteKeyPosLow > 0xC0000000L) {
+                remoteKeyPosHigh += 0x100000000L;
+            } else if (keyPosLow > 0xC0000000L && lastRemoteKeyPosLow < 0x40000000L && remoteKeyPosHigh >= 0x100000000L) {
+                return (remoteKeyPosHigh - 0x100000000L) | keyPosLow;
+            }
+        }
+        if (keyPosLow > lastRemoteKeyPosLow || (lastRemoteKeyPosLow - keyPosLow) > 0x80000000L) {
+            lastRemoteKeyPosLow = keyPosLow;
+        }
+        return remoteKeyPosHigh | keyPosLow;
+    }
 
     // Real-time low-latency ring buffer (32 slots = 533ms max window) + Cauchy Reed-Solomon FEC (Static Zero-GC)
     private static final int REASSEMBLY_RING_SIZE = 32;
@@ -147,6 +163,7 @@ public final class PS5StreamClient {
         int fecUnitsReceived = 0;
         int fecBlockSize = 0;
         volatile boolean completed = false;
+        boolean delivered = false;
         long firstPacketTime = 0;
         final boolean[] unitPresent = new boolean[MAX_UNITS];
         final boolean[] unitDecrypted = new boolean[MAX_UNITS];
@@ -163,6 +180,7 @@ public final class PS5StreamClient {
             fecUnitsReceived = 0;
             fecBlockSize = 0;
             completed = false;
+            delivered = false;
             firstPacketTime = System.currentTimeMillis();
             Arrays.fill(unitPresent, 0, totalUnits, false);
             Arrays.fill(unitDecrypted, 0, totalUnits, false);
@@ -751,6 +769,7 @@ public final class PS5StreamClient {
             synchronized (reassemblySlots[i]) {
                 reassemblySlots[i].frameIndex = -1;
                 reassemblySlots[i].completed = false;
+                reassemblySlots[i].delivered = false;
                 reassemblySlots[i].unitsReceivedCount = 0;
                 reassemblySlots[i].fecUnitsReceived = 0;
             }
@@ -760,11 +779,13 @@ public final class PS5StreamClient {
         nextDeliveryFrame = -1;
         highestReceivedFrame = -1;
         waitingForIdr = true;
+        remoteKeyPosHigh = 0L;
+        lastRemoteKeyPosLow = -1L;
 
         initMediaCodec();
         initAudio();
         udpSocket = new DatagramSocket();
-        udpSocket.setReceiveBufferSize(512 * 1024);
+        udpSocket.setReceiveBufferSize(1024 * 1024);
         try {
             // DSCP CS5 / WMM Video Low-Latency QoS para evitar Power-Save DTIM buffering en router Wi-Fi y Tailscale
             udpSocket.setTrafficClass(0xA0);
@@ -1074,7 +1095,8 @@ public final class PS5StreamClient {
                     if (pktLen >= 22 && streamCipher != null) {
                         boolean hasNalu = ((buf[0] & 0xFF) >> 4 & 1) != 0;
                         int dword2 = ((buf[5] & 0xFF) << 24) | ((buf[6] & 0xFF) << 16) | ((buf[7] & 0xFF) << 8) | (buf[8] & 0xFF);
-                        long keyPos = (((long) buf[14] & 0xFF) << 24) | (((long) buf[15] & 0xFF) << 16) | (((long) buf[16] & 0xFF) << 8) | ((long) buf[17] & 0xFF);
+                        long keyPosLow = (((long) buf[14] & 0xFF) << 24) | (((long) buf[15] & 0xFF) << 16) | (((long) buf[16] & 0xFF) << 8) | ((long) buf[17] & 0xFF);
+                        long keyPos = resolveRemoteKeyPos(keyPosLow);
                         int offset = 2 + (hasNalu ? 3 : 0);
                         int payloadOffset = 18 + offset;
                         int encLen = pktLen - payloadOffset;
@@ -1238,7 +1260,8 @@ public final class PS5StreamClient {
         boolean hasNalu = ((buf[0] & 0xFF) >> 4 & 1) != 0;
         int frameIndex = ((buf[3] & 0xFF) << 8) | (buf[4] & 0xFF);
         int dword2 = ((buf[5] & 0xFF) << 24) | ((buf[6] & 0xFF) << 16) | ((buf[7] & 0xFF) << 8) | (buf[8] & 0xFF);
-        long keyPos = (((long) buf[14] & 0xFF) << 24) | (((long) buf[15] & 0xFF) << 16) | (((long) buf[16] & 0xFF) << 8) | ((long) buf[17] & 0xFF);
+        long keyPosLow = (((long) buf[14] & 0xFF) << 24) | (((long) buf[15] & 0xFF) << 16) | (((long) buf[16] & 0xFF) << 8) | ((long) buf[17] & 0xFF);
+        long keyPos = resolveRemoteKeyPos(keyPosLow);
 
         int unitIndex = (dword2 >>> 21) & 0x7FF;
         int totalUnits = ((dword2 >>> 10) & 0x7FF) + 1;
@@ -1264,8 +1287,11 @@ public final class PS5StreamClient {
         boolean notifyDispatch = false;
 
         synchronized (slot) {
+            if (slot.frameIndex == frameIndex && slot.delivered) {
+                return;
+            }
             if (slot.frameIndex != frameIndex) {
-                if (slot.frameIndex >= 0 && !slot.completed) {
+                if (slot.frameIndex >= 0 && !slot.completed && !slot.delivered) {
                     int lost = Math.max(0, slot.expectedSrcUnits - slot.unitsReceivedCount);
                     if (lost > 0) {
                         totalPacketsLost += lost;
@@ -1275,19 +1301,14 @@ public final class PS5StreamClient {
             }
 
             if (!slot.unitPresent[unitIndex]) {
+                System.arraycopy(buf, offset, slot.unitBuffers[unitIndex], 0, encLen);
+                slot.unitDecrypted[unitIndex] = false;
+                slot.unitLengths[unitIndex] = encLen;
+                slot.unitKeyPos[unitIndex] = keyPos;
+                slot.unitPresent[unitIndex] = true;
                 if (unitIndex < slot.expectedSrcUnits) {
-                    streamCipher.decrypt(buf, offset, encLen, keyPos, slot.unitBuffers[unitIndex], 0);
-                    slot.unitDecrypted[unitIndex] = true;
-                    slot.unitLengths[unitIndex] = encLen;
-                    slot.unitKeyPos[unitIndex] = keyPos;
-                    slot.unitPresent[unitIndex] = true;
                     slot.unitsReceivedCount++;
                 } else {
-                    System.arraycopy(buf, offset, slot.unitBuffers[unitIndex], 0, encLen);
-                    slot.unitDecrypted[unitIndex] = false;
-                    slot.unitLengths[unitIndex] = encLen;
-                    slot.unitKeyPos[unitIndex] = keyPos;
-                    slot.unitPresent[unitIndex] = true;
                     slot.fecUnitsReceived++;
                     if (slot.fecBlockSize == 0) {
                         slot.fecBlockSize = encLen;
@@ -1363,7 +1384,7 @@ public final class PS5StreamClient {
             }
             outLenHolder[0] = assembleSlotToBuffer(slot, outBuf);
             slot.completed = false;
-            slot.frameIndex = -1;
+            slot.delivered = true;
             return true;
         }
     }
@@ -1573,11 +1594,11 @@ public final class PS5StreamClient {
                 synchronized (targetSlot) {
                     if (targetSlot.frameIndex == targetFrame && targetSlot.completed) {
                         completedJustNow = true;
-                    } else if (targetSlot.frameIndex == targetFrame && !targetSlot.completed) {
+                    } else if (targetSlot.frameIndex == targetFrame && !targetSlot.completed && !targetSlot.delivered) {
                         int lost = Math.max(0, targetSlot.expectedSrcUnits - targetSlot.unitsReceivedCount);
                         if (lost > 0) totalPacketsLost += lost;
                         targetSlot.completed = false;
-                        targetSlot.frameIndex = -1;
+                        targetSlot.delivered = true;
                     }
                 }
                 if (completedJustNow) {
