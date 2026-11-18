@@ -52,7 +52,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
-    private static final String APP_VERSION = "2.0.17";
+    private static final String APP_VERSION = "2.0.18";
 
     private ConfigStore cfg;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
