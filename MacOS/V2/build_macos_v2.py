@@ -356,8 +356,8 @@ def build_edition(is_personal: bool):
     <key>CFBundleName</key><string>DRPS5</string>
     <key>CFBundleDisplayName</key><string>DRPS5 Remote Play</string>
     <key>CFBundleIdentifier</key><string>com.drps5.remoteplay</string>
-    <key>CFBundleVersion</key><string>2.0.18</string>
-    <key>CFBundleShortVersionString</key><string>2.0.18</string>
+    <key>CFBundleVersion</key><string>2.0.19</string>
+    <key>CFBundleShortVersionString</key><string>2.0.19</string>
     <key>CFBundleExecutable</key><string>DRPS5</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>

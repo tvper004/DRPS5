@@ -388,7 +388,7 @@ function renderSettings() {
       box.scrollTop = box.scrollHeight;
     });
   } else {
-    addSettingRow(list, "DRPS5 Versión", "Interfaz WebOS V2 Nativa para Escritorio", `2.0.18 (${state.sysInfo.edition})`, null);
+    addSettingRow(list, "DRPS5 Versión", "Interfaz WebOS V2 Nativa para Escritorio", `2.0.19 (${state.sysInfo.edition})`, null);
     addSettingRow(list, "Arquitectura CPU", "Detección nativa Apple Silicon / Intel / x64 / ARM64", state.sysInfo.arch, null);
     addSettingRow(list, "Aceleración Gráfica", "Renderizador GPU Metal CAS para 2K/4K @ 60FPS", `${state.sysInfo.gpu} (${state.sysInfo.hwaccel})`, null);
   }

@@ -156,28 +156,6 @@ class Controller:
         except Exception as error:
             _LOGGER.debug("Error enviando estado de sticks: %s", error)
 
-    def touchpad(self, down: bool, pointer_id: int = 0, x: int = 960, y: int = 470, repeats: int = 1):
-        """Send 5-byte PS5 Takion touchpad coordinate event (0..1919, 0..941)."""
-        try:
-            if not self._check_session() or not getattr(self._session, "stream", None):
-                return
-            cx = max(0, min(1919, int(x)))
-            cy = max(0, min(941, int(y)))
-            data = bytes([
-                0xD0 if down else 0xC0,
-                pointer_id & 0x7F,
-                (cx >> 4) & 0xFF,
-                ((cx & 0x0F) << 4) | ((cy >> 8) & 0x0F),
-                cy & 0xFF,
-            ])
-            for _ in range(max(1, repeats)):
-                self._session.stream.send_feedback(
-                    FeedbackHeader.Type.EVENT, self._sequence_event, data=data, count=1
-                )
-                self._sequence_event = (self._sequence_event + 1) & 0xFFFF
-        except Exception as error:
-            _LOGGER.debug("Error enviando touchpad: %s", error)
-
     def _send_event(self):
         """Send controller button event con triple redundancia UDP limpia sin arrastrar eventos antiguos."""
         try:

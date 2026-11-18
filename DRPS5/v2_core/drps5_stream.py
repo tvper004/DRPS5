@@ -921,6 +921,8 @@ def run_drps5_stream(
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Helvetica", 18, bold=True)
     small_font = pygame.font.SysFont("Helvetica", 14)
+    menu_title_font = pygame.font.SysFont("Helvetica", 20, bold=True)
+    menu_item_font = pygame.font.SysFont("Helvetica", 15, bold=True)
 
     receiver = DRPS5Receiver(audio_enabled=audio_enabled, cas_strength=cas_strength)
 
@@ -1016,6 +1018,71 @@ def run_drps5_stream(
     current_frame = None
     pressed_buttons = set()
     pressed_physical_buttons = {}
+
+    # Control del Menú de Transmisión (equivalente al in-stream overlay de Android)
+    stream_menu_open = False
+    menu_selected_idx = 0
+    menu_items_rects = []
+    menu_card_rect = pygame.Rect(0, 0, 0, 0)
+    last_stick_nav_time = 0.0
+
+    def get_menu_items():
+        cas_label = "Desactivado"
+        if cas_strength >= 180:
+            cas_label = "Alto (100%)"
+        elif cas_strength >= 115:
+            cas_label = "Medio (60%)"
+        elif cas_strength > 0:
+            cas_label = "Bajo (30%)"
+
+        return [
+            {"id": "resume", "icon": "▶", "title": "Volver al juego", "desc": "Reanudar transmisión", "badge": None},
+            {"id": "hud", "icon": "⚙", "title": "HUD en pantalla", "desc": "Estadísticas en tiempo real", "badge": "Activado" if show_hud else "Oculto"},
+            {"id": "cas", "icon": "✦", "title": "Nitidez CAS (Metal)", "desc": "Escalado adaptativo GPU", "badge": cas_label},
+            {"id": "audio", "icon": "🔊", "title": "Audio de sesión", "desc": "Salida de sonido PCM 48kHz", "badge": "Activado" if getattr(receiver, "audio_enabled", True) else "Silenciado"},
+            {"id": "fullscreen", "icon": "🖥️", "title": "Pantalla completa", "desc": "Modo ventana o Spaces", "badge": "Completa" if fullscreen else "Ventana"},
+            {"id": "disconnect", "icon": "✕", "title": "Desconectar sesión", "desc": "Salir al menú de DRPS5", "badge": None, "danger": True},
+        ]
+
+    def execute_menu_action(action_id: str):
+        nonlocal stream_menu_open, show_hud, cas_strength, fullscreen, running
+        if action_id == "resume":
+            stream_menu_open = False
+        elif action_id == "hud":
+            show_hud = not show_hud
+            receiver._hud_cache_key = None
+        elif action_id == "cas":
+            if cas_strength < 40:
+                cas_strength = 85
+            elif cas_strength < 115:
+                cas_strength = 145
+            elif cas_strength < 180:
+                cas_strength = 210
+            else:
+                cas_strength = 0
+            receiver.cas_strength = cas_strength
+            receiver._hud_cache_key = None
+        elif action_id == "audio":
+            new_audio = not getattr(receiver, "audio_enabled", True)
+            receiver.audio_enabled = new_audio
+            receiver._hud_cache_key = None
+        elif action_id == "fullscreen":
+            fullscreen = not fullscreen
+            if not toggle_macos_fullscreen():
+                try:
+                    pygame.display.toggle_fullscreen()
+                except Exception:
+                    pass
+            configure_cocoa_window()
+            try:
+                if session and not session.is_stopped:
+                    session.stream.send_corrupt(0, 0)
+            except Exception:
+                pass
+        elif action_id == "disconnect":
+            logger.info("Desconexión solicitada desde el menú de transmisión.")
+            running = False
+            stream_menu_open = False
 
     # Control de visibilidad automática del cursor del ratón y tracking continuo
     last_mouse_activity = time.time()
@@ -1134,12 +1201,17 @@ def run_drps5_stream(
                     # evitando que el micro-temblor o el giroscopio del DualSense despierten el cursor
                     elif event.type == pygame.MOUSEMOTION:
                         m_dx, m_dy = getattr(event, "rel", (0, 0))
-                        if abs(m_dx) > 6 or abs(m_dy) > 6:
+                        if abs(m_dx) > 3 or abs(m_dy) > 3:
                             last_mouse_activity = time.time()
                             last_mouse_pos = event.pos
                             if not mouse_visible:
                                 pygame.mouse.set_visible(True)
                                 mouse_visible = True
+                        if stream_menu_open:
+                            for idx, (r, a_id) in enumerate(menu_items_rects):
+                                if r.collidepoint(event.pos):
+                                    menu_selected_idx = idx
+                                    break
 
                     elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
                         last_mouse_activity = time.time()
@@ -1148,14 +1220,35 @@ def run_drps5_stream(
                             pygame.mouse.set_visible(True)
                             mouse_visible = True
 
-                        # Detección de clic en botón Cerrar translúcido en esquina superior derecha
-                        screen_w, _ = screen.get_size()
-                        btn_w, btn_h = 96, 34
-                        btn_rect = pygame.Rect(screen_w - btn_w - 16, 16, btn_w, btn_h)
-                        if event.button == 1 and btn_rect.collidepoint(event.pos):
-                            logger.info("Botón Cerrar pulsado con el ratón. Saliendo de la pantalla remota...")
-                            running = False
-                            break
+                        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                            if stream_menu_open:
+                                clicked_action = None
+                                for r, a_id in menu_items_rects:
+                                    if r.collidepoint(event.pos):
+                                        clicked_action = a_id
+                                        break
+                                if clicked_action:
+                                    execute_menu_action(clicked_action)
+                                elif not menu_card_rect.collidepoint(event.pos):
+                                    stream_menu_open = False
+                                continue
+
+                            # Detección de clic en botón Salir translúcido en esquina superior derecha
+                            screen_w, _ = screen.get_size()
+                            btn_w, btn_h = 92, 34
+                            btn_rect = pygame.Rect(screen_w - btn_w - 16, 16, btn_w, btn_h)
+                            if btn_rect.collidepoint(event.pos):
+                                logger.info("Botón Salir pulsado con el ratón. Desconectando sesión...")
+                                running = False
+                                break
+
+                            # Detección de clic en el HUD para abrir el menú de transmisión
+                            hud_rect = pygame.Rect(10, 10, 400, 92)
+                            if show_hud and hud_rect.collidepoint(event.pos):
+                                logger.info("HUD pulsado con el ratón. Abriendo menú de transmisión...")
+                                stream_menu_open = True
+                                menu_selected_idx = 0
+                                continue
 
                     # Eventos de cambio de pantalla / desconexión o reposo de lentes XR / cambio de resolución
                     elif event.type in (getattr(pygame, "WINDOWDISPLAYCHANGED", 32791),
@@ -1224,6 +1317,23 @@ def run_drps5_stream(
                     elif event.type == pygame.CONTROLLERBUTTONDOWN:
                         logger.info(f"🎮 CONTROLLERBUTTONDOWN: button={event.button}")
                         btn_name = SDL_CONTROLLER_MAP.get(event.button)
+
+                        # Si el menú de transmisión está abierto, capturar entradas para navegarlo
+                        if stream_menu_open:
+                            items = get_menu_items()
+                            if event.button == pygame.CONTROLLER_BUTTON_DPAD_UP or btn_name == "UP":
+                                menu_selected_idx = (menu_selected_idx - 1) % len(items)
+                            elif event.button == pygame.CONTROLLER_BUTTON_DPAD_DOWN or btn_name == "DOWN":
+                                menu_selected_idx = (menu_selected_idx + 1) % len(items)
+                            elif event.button == pygame.CONTROLLER_BUTTON_A or btn_name == ("CIRCLE" if cfg_circle_confirm else "CROSS"):
+                                if 0 <= menu_selected_idx < len(items):
+                                    execute_menu_action(items[menu_selected_idx]["id"])
+                            elif event.button == pygame.CONTROLLER_BUTTON_B or btn_name == ("CROSS" if cfg_circle_confirm else "CIRCLE"):
+                                stream_menu_open = False
+                            elif event.button in (cfg_opt_btn, cfg_share_btn, pygame.CONTROLLER_BUTTON_START, pygame.CONTROLLER_BUTTON_BACK) or btn_name in ("OPTIONS", "SHARE"):
+                                stream_menu_open = False
+                            continue
+
                         target_name = None
 
                         # Prioridad 1: Botón PS (Home) asignado o estándar
@@ -1248,13 +1358,26 @@ def run_drps5_stream(
                                 pressed_buttons.add(target_name)
                                 controller.button(target_name, action="press")
 
-                            # Salida rápida por combo de mando: SHARE + OPTIONS
+                            # Menú de transmisión por combo de mando: CAPTURE / SHARE + OPTIONS
                             if "SHARE" in pressed_buttons and "OPTIONS" in pressed_buttons:
-                                logger.info("Combo Share + Options detectado en mando físico. Saliendo de la pantalla remota...")
-                                running = False
-                                break
+                                logger.info("🎮 Combo Capture + Options detectado en mando físico. Abriendo menú de transmisión...")
+                                for b in ("SHARE", "OPTIONS"):
+                                    try:
+                                        controller.button(b, action="release")
+                                    except Exception:
+                                        pass
+                                    pressed_buttons.discard(b)
+                                pressed_physical_buttons.clear()
+                                stream_menu_open = not stream_menu_open
+                                if stream_menu_open:
+                                    menu_selected_idx = 0
+                                    mouse_visible = True
+                                    pygame.mouse.set_visible(True)
+                                continue
 
                     elif event.type == pygame.CONTROLLERBUTTONUP:
+                        if stream_menu_open:
+                            continue
                         btn_name = SDL_CONTROLLER_MAP.get(event.button)
                         target_name = None
                         if event.button == cfg_ps_btn or btn_name == "PS":
@@ -1276,20 +1399,21 @@ def run_drps5_stream(
                                 pressed_buttons.discard(target_name)
                                 controller.button(target_name, action="release")
 
-                    # Superficie táctil capacitiva real del mando DualSense / DualShock 4 (gestos swipe multi-touch)
-                    elif event.type in (
-                        getattr(pygame, "CONTROLLERTOUCHPADDOWN", -1),
-                        getattr(pygame, "CONTROLLERTOUCHPADMOTION", -2),
-                        getattr(pygame, "CONTROLLERTOUCHPADUP", -3),
-                    ):
-                        is_down = event.type != getattr(pygame, "CONTROLLERTOUCHPADUP", -3)
-                        finger = int(getattr(event, "finger", 0)) & 0x01
-                        tx = int(max(0.0, min(1.0, float(getattr(event, "x", 0.5)))) * 1919)
-                        ty = int(max(0.0, min(1.0, float(getattr(event, "y", 0.5)))) * 941)
-                        controller.touchpad(is_down, pointer_id=finger, x=tx, y=ty, repeats=(1 if event.type == getattr(pygame, "CONTROLLERTOUCHPADMOTION", -2) else 2))
-
                     # Ejes analógicos y gatillos de GameController (-32768 a 32767) con zona muerta radial 2D real
                     elif event.type == pygame.CONTROLLERAXISMOTION:
+                        if stream_menu_open:
+                            axis = getattr(event, "axis", -1)
+                            val = getattr(event, "value", 0)
+                            if axis == pygame.CONTROLLER_AXIS_LEFTY:
+                                norm_val = val / 32767.0
+                                now = time.time()
+                                if norm_val < -0.55 and (now - last_stick_nav_time > 0.22):
+                                    menu_selected_idx = (menu_selected_idx - 1) % len(get_menu_items())
+                                    last_stick_nav_time = now
+                                elif norm_val > 0.55 and (now - last_stick_nav_time > 0.22):
+                                    menu_selected_idx = (menu_selected_idx + 1) % len(get_menu_items())
+                                    last_stick_nav_time = now
+                            continue
                         val = max(-1.0, min(1.0, event.value / 32767.0))
                         axis = event.axis
                         if axis == pygame.CONTROLLER_AXIS_LEFTX:
@@ -1317,10 +1441,24 @@ def run_drps5_stream(
 
                     # Soporte para Joysticks genéricos cuando no hay GameController activo
                     elif event.type == pygame.JOYBUTTONDOWN:
-                        if active_controllers:
+                        if active_controllers and event.button not in (cfg_touch_btn, 20, 19, 18, 16, 15, cfg_ps_btn):
                             continue
                         logger.info(f"🕹️ JOYBUTTONDOWN (Joystick Genérico): button={event.button}")
                         btn_name = RAW_JOYSTICK_BUTTON_MAP.get(event.button)
+
+                        if stream_menu_open:
+                            items = get_menu_items()
+                            if btn_name == "UP":
+                                menu_selected_idx = (menu_selected_idx - 1) % len(items)
+                            elif btn_name == "DOWN":
+                                menu_selected_idx = (menu_selected_idx + 1) % len(items)
+                            elif btn_name == ("CIRCLE" if cfg_circle_confirm else "CROSS"):
+                                if 0 <= menu_selected_idx < len(items):
+                                    execute_menu_action(items[menu_selected_idx]["id"])
+                            elif btn_name == ("CROSS" if cfg_circle_confirm else "CIRCLE") or btn_name in ("OPTIONS", "SHARE"):
+                                stream_menu_open = False
+                            continue
+
                         target_name = None
                         if event.button == cfg_ps_btn or btn_name == "PS":
                             logger.info(f"⚡ Pulsación Joystick para Botón PS (botón {event.button}). Enviando press...")
@@ -1337,14 +1475,25 @@ def run_drps5_stream(
                                 pressed_buttons.add(target_name)
                                 controller.button(target_name, action="press")
 
-                            # Salida rápida por combo de mando: SHARE + OPTIONS
+                            # Menú de transmisión por combo de mando: CAPTURE / SHARE + OPTIONS
                             if "SHARE" in pressed_buttons and "OPTIONS" in pressed_buttons:
-                                logger.info("Combo Share + Options detectado en mando físico. Saliendo de la pantalla remota...")
-                                running = False
-                                break
+                                logger.info("🎮 Combo Capture + Options detectado en joystick. Abriendo menú de transmisión...")
+                                for b in ("SHARE", "OPTIONS"):
+                                    try:
+                                        controller.button(b, action="release")
+                                    except Exception:
+                                        pass
+                                    pressed_buttons.discard(b)
+                                pressed_physical_buttons.clear()
+                                stream_menu_open = not stream_menu_open
+                                if stream_menu_open:
+                                    menu_selected_idx = 0
+                                    mouse_visible = True
+                                    pygame.mouse.set_visible(True)
+                                continue
 
                     elif event.type == pygame.JOYBUTTONUP:
-                        if active_controllers:
+                        if (active_controllers and event.button not in (cfg_touch_btn, 20, 19, 18, 16, 15, cfg_ps_btn)) or stream_menu_open:
                             continue
                         btn_name = RAW_JOYSTICK_BUTTON_MAP.get(event.button)
                         target_name = None
@@ -1365,6 +1514,18 @@ def run_drps5_stream(
 
                     elif event.type == pygame.JOYAXISMOTION:
                         if not active_controllers:
+                            if stream_menu_open:
+                                if getattr(event, "axis", -1) == 1:
+                                    val = getattr(event, "value", 0.0)
+                                    now = time.time()
+                                    if val < -0.55 and (now - last_stick_nav_time > 0.22):
+                                        menu_selected_idx = (menu_selected_idx - 1) % len(get_menu_items())
+                                        last_stick_nav_time = now
+                                    elif val > 0.55 and (now - last_stick_nav_time > 0.22):
+                                        menu_selected_idx = (menu_selected_idx + 1) % len(get_menu_items())
+                                        last_stick_nav_time = now
+                                continue
+
                             val = max(-1.0, min(1.0, float(event.value)))
                             if event.axis == 0:
                                 raw_stick_left[0] = val
@@ -1389,6 +1550,14 @@ def run_drps5_stream(
 
                     elif event.type == pygame.JOYHATMOTION:
                         if not active_controllers:
+                            if stream_menu_open:
+                                hat_x, hat_y = event.value
+                                if hat_y == 1:
+                                    menu_selected_idx = (menu_selected_idx - 1) % len(get_menu_items())
+                                elif hat_y == -1:
+                                    menu_selected_idx = (menu_selected_idx + 1) % len(get_menu_items())
+                                continue
+
                             hat_x, hat_y = event.value
                             if hat_x == -1:
                                 controller.button("LEFT", action="press")
@@ -1408,11 +1577,32 @@ def run_drps5_stream(
 
                     elif event.type == pygame.KEYDOWN:
                         mods = pygame.key.get_mods()
+                        if stream_menu_open:
+                            items = get_menu_items()
+                            if event.key in (pygame.K_UP, pygame.K_w):
+                                menu_selected_idx = (menu_selected_idx - 1) % len(items)
+                            elif event.key in (pygame.K_DOWN, pygame.K_s):
+                                menu_selected_idx = (menu_selected_idx + 1) % len(items)
+                            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                                if 0 <= menu_selected_idx < len(items):
+                                    execute_menu_action(items[menu_selected_idx]["id"])
+                            elif event.key in (pygame.K_ESCAPE, pygame.K_F2, pygame.K_m):
+                                stream_menu_open = False
+                            elif event.key == pygame.K_F1:
+                                show_hud = not show_hud
+                                receiver._hud_cache_key = None
+                            continue
+
                         if (event.key in (pygame.K_q, pygame.K_w) and (mods & pygame.KMOD_GUI)) or \
                            (event.key == pygame.K_c and (mods & pygame.KMOD_CTRL)):
                             logger.info("Cmd+Q / Cmd+W / Ctrl+C recibido. Saliendo de DRPS5...")
                             running = False
                             break
+
+                        elif event.key in (pygame.K_F2, pygame.K_m):
+                            stream_menu_open = not stream_menu_open
+                            menu_selected_idx = 0
+                            continue
 
                         elif event.key == pygame.K_F11 or (event.key == pygame.K_f and (mods & (pygame.KMOD_GUI | pygame.KMOD_META))):
                             # Alternar pantalla completa nativa de macOS (Spaces)
@@ -1632,12 +1822,12 @@ def run_drps5_stream(
                     ctrl_color = (52, 211, 153) if is_gamepad else (148, 163, 184)
                     hud_surf.blit(small_font.render(f"🎮 {connected_controller_name}", True, ctrl_color), (10, 24))
                     hud_surf.blit(small_font.render(f"🔊 {audio_dev_name}", True, (148, 163, 184)), (10, 42))
-                    hud_surf.blit(small_font.render("F11: Pantalla completa | F1: HUD | Shift+Esc: Salir", True, (203, 213, 225)), (10, 60))
+                    hud_surf.blit(small_font.render("Capture+Options: Menú | F1: HUD | F11: Pantalla completa", True, (203, 213, 225)), (10, 60))
                     receiver._hud_cache_key = hud_key
                     receiver._hud_cache_surf = hud_surf
                 screen.blit(receiver._hud_cache_surf, (10, 10))
 
-            # Botón translúcido de Salir cacheado en esquina superior derecha
+            # Botón translúcido de Menú en esquina superior derecha
             btn_w, btn_h = 96, 34
             btn_x = screen_w - btn_w - 16
             btn_y = 16
@@ -1656,7 +1846,7 @@ def run_drps5_stream(
 
                     s_hov = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
                     pygame.draw.rect(s_hov, (225, 29, 72, 225), (0, 0, btn_w, btn_h), border_radius=8)
-                    pygame.draw.rect(s_hov, (255, 255, 255, 230), (0, 0, btn_w, btn_h), width=2, border_radius=8)
+                    pygame.draw.rect(s_hov, (251, 113, 133, 230), (0, 0, btn_w, btn_h), width=2, border_radius=8)
                     th_t = small_font.render("✕ Salir", True, (255, 255, 255))
                     s_hov.blit(th_t, (btn_w // 2 - th_t.get_width() // 2, btn_h // 2 - th_t.get_height() // 2))
                     receiver._exit_btn_surfs = (s_norm, s_hov)
@@ -1674,8 +1864,123 @@ def run_drps5_stream(
                 toast_surf.blit(t_txt, (tw // 2 - t_txt.get_width() // 2, th // 2 - t_txt.get_height() // 2))
                 screen.blit(toast_surf, (screen_w // 2 - tw // 2, 20))
 
-            # Auto-ocultar cursor de ratón tras 2.5 segundos de inactividad sólo si está lejos del botón de salir
-            if mouse_visible and not in_proximity and not is_hover and (time.time() - last_mouse_activity > 2.5):
+            # Renderizado del Menú de Transmisión Frosted (WebOS / Android V2 style)
+            if stream_menu_open:
+                mouse_visible = True
+                pygame.mouse.set_visible(True)
+
+                # 1. Overlay translúcido de fondo (dimming)
+                overlay_surf = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
+                overlay_surf.fill((5, 8, 17, 215))
+                screen.blit(overlay_surf, (0, 0))
+
+                # 2. Geometría de tarjeta adaptativa
+                items = get_menu_items()
+                card_w = min(540, screen_w - 40)
+                item_h = 42 if screen_h >= 600 else 36
+                item_gap = 7 if screen_h >= 600 else 5
+                header_h = 88 if screen_h >= 600 else 76
+                footer_h = 36
+                card_h = header_h + len(items) * (item_h + item_gap) + footer_h
+                card_x = (screen_w - card_w) // 2
+                card_y = (screen_h - card_h) // 2
+                menu_card_rect = pygame.Rect(card_x, card_y, card_w, card_h)
+
+                # 3. Fondo y borde brillante de la tarjeta
+                card_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+                pygame.draw.rect(card_surf, (15, 23, 42, 248), (0, 0, card_w, card_h), border_radius=16)
+                pygame.draw.rect(card_surf, (56, 189, 248, 140), (0, 0, card_w, card_h), width=2, border_radius=16)
+                screen.blit(card_surf, (card_x, card_y))
+
+                # 4. Título de cabecera
+                title_surf = menu_title_font.render("MENÚ DE TRANSMISIÓN", True, (56, 189, 248))
+                screen.blit(title_surf, (card_x + 22, card_y + 18))
+
+                # 5. Chips informativos en vivo (Calidad y GPU)
+                res_labels = {
+                    "2160p": "4K GPU (2160P)",
+                    "1440p": "2K GPU (1440P)",
+                    "1080p": "1080P FULL HD",
+                    "720p": "720P HD",
+                    "540p": "540P",
+                    "360p": "360P",
+                }
+                res_label_m = res_labels.get(resolution_str, resolution_str.upper())
+                c1_str = f"{res_label_m} • {receiver.fps_displayed} FPS"
+                c1_txt = small_font.render(c1_str, True, (226, 232, 240))
+                c1_w, c1_h = c1_txt.get_width() + 16, 24
+                c1_surf = pygame.Surface((c1_w, c1_h), pygame.SRCALPHA)
+                pygame.draw.rect(c1_surf, (30, 41, 59, 220), (0, 0, c1_w, c1_h), border_radius=12)
+                pygame.draw.rect(c1_surf, (71, 85, 105, 180), (0, 0, c1_w, c1_h), width=1, border_radius=12)
+                c1_surf.blit(c1_txt, (8, (c1_h - c1_txt.get_height()) // 2))
+                screen.blit(c1_surf, (card_x + 22, card_y + 48))
+
+                c2_str = "Metal GPU • 0-Frame Slice"
+                c2_txt = small_font.render(c2_str, True, (52, 211, 153))
+                c2_w, c2_h = c2_txt.get_width() + 16, 24
+                c2_surf = pygame.Surface((c2_w, c2_h), pygame.SRCALPHA)
+                pygame.draw.rect(c2_surf, (6, 78, 59, 160), (0, 0, c2_w, c2_h), border_radius=12)
+                pygame.draw.rect(c2_surf, (52, 211, 153, 140), (0, 0, c2_w, c2_h), width=1, border_radius=12)
+                c2_surf.blit(c2_txt, (8, (c2_h - c2_txt.get_height()) // 2))
+                screen.blit(c2_surf, (card_x + 26 + c1_w, card_y + 48))
+
+                # 6. Opciones interactivas con foco y badges dinámicos
+                menu_items_rects.clear()
+                for idx, item in enumerate(items):
+                    ix = card_x + 20
+                    iy = card_y + header_h + idx * (item_h + item_gap)
+                    iw = card_w - 40
+                    ih = item_h
+                    item_rect = pygame.Rect(ix, iy, iw, ih)
+                    menu_items_rects.append((item_rect, item["id"]))
+
+                    is_sel = (idx == menu_selected_idx)
+                    is_danger = item.get("danger", False)
+
+                    if is_sel:
+                        if is_danger:
+                            bg_col = (225, 29, 72, 240)
+                            border_col = (255, 255, 255, 240)
+                        else:
+                            bg_col = (2, 132, 199, 240)
+                            border_col = (56, 189, 248, 255)
+                        text_col = (255, 255, 255)
+                    else:
+                        bg_col = (30, 41, 59, 190)
+                        border_col = (51, 65, 85, 170)
+                        text_col = (248, 113, 113) if is_danger else (226, 232, 240)
+
+                    btn_surf = pygame.Surface((iw, ih), pygame.SRCALPHA)
+                    pygame.draw.rect(btn_surf, bg_col, (0, 0, iw, ih), border_radius=10)
+                    pygame.draw.rect(btn_surf, border_col, (0, 0, iw, ih), width=2 if is_sel else 1, border_radius=10)
+
+                    label_surf = menu_item_font.render(f"{item['icon']}  {item['title']}", True, text_col)
+                    btn_surf.blit(label_surf, (14, (ih - label_surf.get_height()) // 2))
+
+                    if item.get("badge"):
+                        badge_text = str(item["badge"])
+                        is_active = (badge_text in ("Activado", "Completa", "Alto (100%)", "Medio (60%)", "Bajo (30%)"))
+                        b_txt_col = (255, 255, 255) if is_sel else ((52, 211, 153) if is_active else (148, 163, 184))
+                        b_surf = small_font.render(badge_text, True, b_txt_col)
+                        bw, bh = b_surf.get_width() + 16, 24
+                        bx, by = iw - bw - 12, (ih - bh) // 2
+                        p_surf = pygame.Surface((bw, bh), pygame.SRCALPHA)
+                        p_bg = (0, 0, 0, 90) if is_sel else ((16, 185, 129, 50) if is_active else (15, 23, 42, 160))
+                        p_border = (255, 255, 255, 180) if is_sel else ((16, 185, 129, 130) if is_active else (71, 85, 105, 130))
+                        pygame.draw.rect(p_surf, p_bg, (0, 0, bw, bh), border_radius=6)
+                        pygame.draw.rect(p_surf, p_border, (0, 0, bw, bh), width=1, border_radius=6)
+                        p_surf.blit(b_surf, (8, (bh - b_surf.get_height()) // 2))
+                        btn_surf.blit(p_surf, (bx, by))
+
+                    screen.blit(btn_surf, (ix, iy))
+
+                # 7. Pie de navegación
+                footer_str = "Mando: ↑↓ Mover • ✕ Seleccionar • ○ Volver  |  Teclado: Enter / Esc"
+                footer_surf = small_font.render(footer_str, True, (148, 163, 184))
+                screen.blit(footer_surf, (card_x + (card_w - footer_surf.get_width()) // 2, card_y + card_h - footer_h + 8))
+
+            # Auto-ocultar cursor de ratón tras 2.5 segundos de inactividad sólo si está lejos del botón de salir y el menú no está abierto
+            if not stream_menu_open and mouse_visible and not in_proximity and not is_hover and (time.time() - last_mouse_activity > 2.5):
                 pygame.mouse.set_visible(False)
                 mouse_visible = False
 
@@ -1694,6 +1999,10 @@ def run_drps5_stream(
                     c_first = next(iter(active_controllers.values()))
                     if c_first and c_first.attached():
                         for b_code in list(pressed_physical_buttons.keys()):
+                            b_name = pressed_physical_buttons.get(b_code)
+                            # Preservar pulsaciones sostenidas de botones críticos (Touchpad para cinemáticas y PS para menús)
+                            if b_name in ("TOUCHPAD", "PS"):
+                                continue
                             try:
                                 if hasattr(c_first, "get_button") and not c_first.get_button(b_code):
                                     b_name = pressed_physical_buttons.pop(b_code, None)
