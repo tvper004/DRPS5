@@ -94,6 +94,7 @@ public final class MainActivity extends Activity {
     private TouchGamepadOverlayView touchOverlay;
     private StreamOverlayMenu streamOverlayMenu;
     private TextView streamHudPill;
+    private String lastHudStatsText = "";
     private PS5StreamClient streamClient;
     private boolean streaming = false;
     private boolean hasPhysicalGamepad = false;
@@ -149,14 +150,59 @@ public final class MainActivity extends Activity {
         }, 650);
     }
 
+    private static final long BACKGROUND_DISCONNECT_MS = 20_000L;
+    private boolean inBackground = false;
+    private long backgroundSinceMs = 0L;
+    private final Runnable bgDisconnectRunnable = () -> {
+        if (inBackground && streaming) {
+            AppLogger.i("LIFE", "Cerrando sesión remota tras 20s en segundo plano");
+            stopStreamSession();
+        }
+    };
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        uiHandler.removeCallbacks(bgDisconnectRunnable);
+        if (inBackground && streaming && backgroundSinceMs > 0
+                && System.currentTimeMillis() - backgroundSinceMs >= BACKGROUND_DISCONNECT_MS) {
+            AppLogger.i("LIFE", "Sesión remota cerrada al volver tras >=20s en segundo plano");
+            stopStreamSession();
+            Toast.makeText(this, "Sesión cerrada tras permanecer en segundo plano. Pulsa para volver a conectar.", Toast.LENGTH_SHORT).show();
+        }
+        inBackground = false;
+        backgroundSinceMs = 0L;
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         applyImmersiveFullscreen();
+        if (streaming && upscaleRenderer != null) {
+            upscaleRenderer.onResume();
+        }
+        if (streaming && streamClient != null) {
+            streamClient.requestRecoveryIdr();
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (streaming && !isChangingConfigurations()) {
+            inBackground = true;
+            backgroundSinceMs = System.currentTimeMillis();
+            if (upscaleRenderer != null) {
+                upscaleRenderer.onPause();
+            }
+            uiHandler.removeCallbacks(bgDisconnectRunnable);
+            uiHandler.postDelayed(bgDisconnectRunnable, BACKGROUND_DISCONNECT_MS);
+        }
     }
 
     @Override
     protected void onDestroy() {
+        uiHandler.removeCallbacks(bgDisconnectRunnable);
         uiHandler.removeCallbacks(clockTick);
         stopStreamSession();
         super.onDestroy();
@@ -1016,6 +1062,10 @@ public final class MainActivity extends Activity {
                 if (streamClient != null) streamClient.setSticks(lx, ly, rx, ry);
             }
             @Override
+            public void sendTouchpadEvent(boolean down, int pointerId, int x, int y) {
+                if (streamClient != null) streamClient.sendTouchpadEvent(down, pointerId, x, y);
+            }
+            @Override
             public void onMenuRequested() {
                 toggleStreamOverlayMenu();
             }
@@ -1023,12 +1073,13 @@ public final class MainActivity extends Activity {
         touchOverlay.setVisibility(View.GONE);
 
         streamHudPill = WebOSTheme.makePill(this, "Conectando...", 0xAA070B16, WebOSTheme.COL_TEXT);
+        streamHudPill.setTextSize(10.5f);
         streamHudPill.setClickable(true);
         streamHudPill.setOnClickListener(v -> toggleStreamOverlayMenu());
         FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
-        hlp.topMargin = WebOSTheme.dp(this, 12);
-        hlp.rightMargin = WebOSTheme.dp(this, 14);
+        hlp.topMargin = WebOSTheme.dp(this, 44);
+        hlp.rightMargin = WebOSTheme.dp(this, 10);
 
         streamOverlayMenu = new StreamOverlayMenu(this, cfg, new StreamOverlayMenu.Listener() {
             @Override
@@ -1047,6 +1098,17 @@ public final class MainActivity extends Activity {
             public void onToggleTouchControls() {
                 boolean show = touchOverlay.getVisibility() != View.VISIBLE;
                 touchOverlay.setVisibility(show ? View.VISIBLE : View.GONE);
+                updateStreamOverlayInfo();
+            }
+            @Override
+            public void onToggleCompactHud() {
+                cfg.compactHud = !cfg.compactHud;
+                cfg.save();
+                if (cfg.compactHud) {
+                    streamHudPill.setText("⚙");
+                } else {
+                    streamHudPill.setText(lastHudStatsText.isEmpty() ? "⚙" : lastHudStatsText);
+                }
                 updateStreamOverlayInfo();
             }
             @Override
@@ -1191,7 +1253,8 @@ public final class MainActivity extends Activity {
                         }
                         String txt = String.format(Locale.US, "%.0f fps • %s%s  ⚙",
                             fps, cfg.getResolutionLabel(), gpuInfo);
-                        streamHudPill.setText(txt);
+                        lastHudStatsText = txt;
+                        streamHudPill.setText(cfg.compactHud ? "⚙" : txt);
                         if (streamOverlayMenu.isMenuOpen()) {
                             updateStreamOverlayInfo();
                         }
@@ -1243,7 +1306,8 @@ public final class MainActivity extends Activity {
             cfg.getResolutionLabel() + " • " + cfg.fps + " fps",
             gpu,
             cfg.getUpscaleLabel(),
-            touchOverlay.getVisibility() == View.VISIBLE
+            touchOverlay.getVisibility() == View.VISIBLE,
+            cfg.compactHud
         );
     }
 

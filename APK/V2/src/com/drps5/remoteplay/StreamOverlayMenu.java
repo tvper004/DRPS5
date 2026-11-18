@@ -8,6 +8,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 /**
@@ -18,6 +19,7 @@ public final class StreamOverlayMenu extends FrameLayout {
         void onResumeGame();
         void onCycleUpscale();
         void onToggleTouchControls();
+        void onToggleCompactHud();
         void onSendPsButton();
         void onDisconnect();
     }
@@ -26,6 +28,7 @@ public final class StreamOverlayMenu extends FrameLayout {
     private final TextView chipTelemetry;
     private final TextView btnUpscale;
     private final TextView btnTouch;
+    private final TextView btnCompactHud;
     private final TextView btnResume;
     private final Listener listener;
 
@@ -37,26 +40,32 @@ public final class StreamOverlayMenu extends FrameLayout {
         setClickable(true);
         setFocusable(false);
 
+        ScrollView scroll = new ScrollView(ctx);
+        scroll.setVerticalScrollBarEnabled(false);
+        FrameLayout.LayoutParams scLp = new FrameLayout.LayoutParams(
+            WebOSTheme.dp(ctx, 560), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+        scLp.topMargin = WebOSTheme.dp(ctx, 8);
+        scLp.bottomMargin = WebOSTheme.dp(ctx, 8);
+        addView(scroll, scLp);
+
         LinearLayout sheet = new LinearLayout(ctx);
         sheet.setOrientation(LinearLayout.VERTICAL);
-        sheet.setPadding(WebOSTheme.dp(ctx, 28), WebOSTheme.dp(ctx, 24), WebOSTheme.dp(ctx, 28), WebOSTheme.dp(ctx, 24));
+        sheet.setPadding(WebOSTheme.dp(ctx, 20), WebOSTheme.dp(ctx, 14), WebOSTheme.dp(ctx, 20), WebOSTheme.dp(ctx, 14));
         sheet.setBackground(WebOSTheme.makeCardDrawable(ctx, WebOSTheme.COL_SHEET, WebOSTheme.COL_FROST_BORDER, 20, 1));
-
-        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(
-            WebOSTheme.dp(ctx, 560), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
-        addView(sheet, slp);
+        scroll.addView(sheet, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(ctx);
         title.setText("MENU DE TRANSMISION");
         title.setTextColor(WebOSTheme.COL_ACCENT_HI);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setLetterSpacing(0.08f);
         sheet.addView(title);
 
         LinearLayout chipsRow = new LinearLayout(ctx);
         chipsRow.setOrientation(LinearLayout.HORIZONTAL);
-        chipsRow.setPadding(0, WebOSTheme.dp(ctx, 10), 0, WebOSTheme.dp(ctx, 16));
+        chipsRow.setPadding(0, WebOSTheme.dp(ctx, 6), 0, WebOSTheme.dp(ctx, 10));
         sheet.addView(chipsRow);
 
         chipQuality = WebOSTheme.makePill(ctx, cfg.getResolutionLabel() + " • " + cfg.fps + " fps", WebOSTheme.COL_TRACK, WebOSTheme.COL_TEXT);
@@ -87,6 +96,12 @@ public final class StreamOverlayMenu extends FrameLayout {
         });
         sheet.addView(btnTouch, rowLp(ctx));
 
+        btnCompactHud = makeActionBtn(ctx, "⚙  HUD en pantalla: " + (cfg.compactHud ? "Solo icono" : "Completo"), false);
+        btnCompactHud.setOnClickListener(v -> {
+            if (listener != null) listener.onToggleCompactHud();
+        });
+        sheet.addView(btnCompactHud, rowLp(ctx));
+
         TextView btnPs = makeActionBtn(ctx, "⌘  Pulsar Boton PS", false);
         btnPs.setOnClickListener(v -> {
             if (listener != null) listener.onSendPsButton();
@@ -103,11 +118,12 @@ public final class StreamOverlayMenu extends FrameLayout {
         sheet.addView(btnDisconnect, rowLp(ctx));
     }
 
-    public void updateStats(String qualityText, String telemetryText, String upscaleLabel, boolean touchVisible) {
+    public void updateStats(String qualityText, String telemetryText, String upscaleLabel, boolean touchVisible, boolean compactHud) {
         chipQuality.setText(qualityText);
         chipTelemetry.setText(telemetryText);
         btnUpscale.setText("✦  Reescalado GPU: " + upscaleLabel);
         btnTouch.setText("🎮  Controles tactiles: " + (touchVisible ? "Visibles" : "Ocultos"));
+        btnCompactHud.setText("⚙  HUD en pantalla: " + (compactHud ? "Solo icono" : "Completo"));
     }
 
     public void showMenu() {
@@ -126,7 +142,7 @@ public final class StreamOverlayMenu extends FrameLayout {
     private static LinearLayout.LayoutParams rowLp(Context ctx) {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = WebOSTheme.dp(ctx, 8);
+        lp.bottomMargin = WebOSTheme.dp(ctx, 6);
         return lp;
     }
 
@@ -134,9 +150,9 @@ public final class StreamOverlayMenu extends FrameLayout {
         TextView tv = new TextView(ctx);
         tv.setText(text);
         tv.setTextColor(WebOSTheme.COL_TEXT);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setPadding(WebOSTheme.dp(ctx, 16), WebOSTheme.dp(ctx, 13), WebOSTheme.dp(ctx, 16), WebOSTheme.dp(ctx, 13));
+        tv.setPadding(WebOSTheme.dp(ctx, 14), WebOSTheme.dp(ctx, 9), WebOSTheme.dp(ctx, 14), WebOSTheme.dp(ctx, 9));
         tv.setFocusable(true);
         tv.setClickable(true);
         tv.setBackground(primary ? WebOSTheme.makeAccentSelector(ctx, 12) : WebOSTheme.makeFrostSelector(ctx, 12));

@@ -83,6 +83,7 @@ public final class ConfigStore {
     public boolean rumble = true;
     public boolean circleConfirm = false;
     public String touchControls = "auto";    // "auto", "always", "never"
+    public boolean compactHud = false;
     public boolean probeLog = false;
     public String psnAccountId = "";
     public String psnOnlineId = "";
@@ -117,6 +118,7 @@ public final class ConfigStore {
             rumble = root.optBoolean("rumble", true);
             circleConfirm = root.optBoolean("circle_confirm", false);
             touchControls = root.optString("touch_controls", "auto");
+            compactHud = root.optBoolean("compact_hud", false);
             probeLog = root.optBoolean("probe_log", false);
             psnAccountId = root.optString("psn_account_id", "");
             psnOnlineId = root.optString("psn_online_id", "");
@@ -188,6 +190,7 @@ public final class ConfigStore {
             root.put("rumble", rumble);
             root.put("circle_confirm", circleConfirm);
             root.put("touch_controls", touchControls);
+            root.put("compact_hud", compactHud);
             root.put("probe_log", probeLog);
             root.put("psn_account_id", psnAccountId);
             root.put("psn_online_id", psnOnlineId);

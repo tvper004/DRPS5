@@ -10,6 +10,7 @@ import android.view.Surface;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
@@ -83,7 +84,7 @@ public final class UpscaleRenderer extends GLSurfaceView
 
     private SurfaceTexture surfaceTexture;
     private Surface decoderSurface;
-    private volatile boolean frameAvailable = false;
+    private final AtomicInteger pendingFrames = new AtomicInteger(0);
 
     private int srcWidth = 1920;
     private int srcHeight = 1080;
@@ -113,6 +114,7 @@ public final class UpscaleRenderer extends GLSurfaceView
 
         setEGLContextClientVersion(2);
         setEGLConfigChooser(8, 8, 8, 8, 0, 0);
+        setPreserveEGLContextOnPause(true);
         setRenderer(this);
         setRenderMode(RENDERMODE_WHEN_DIRTY);
     }
@@ -151,8 +153,13 @@ public final class UpscaleRenderer extends GLSurfaceView
         slowFrameStreak = 0;
 
         post(() -> {
-            int applyW = Math.min(targetOutWidth, maxViewportW);
-            int applyH = Math.min(targetOutHeight, maxViewportH);
+            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            int dispW = Math.max(dm.widthPixels, dm.heightPixels);
+            int dispH = Math.min(dm.widthPixels, dm.heightPixels);
+            int capW = Math.min(maxViewportW, Math.min(2560, dispW > 0 ? dispW : 1920));
+            int capH = Math.min(maxViewportH, Math.min(1440, dispH > 0 ? dispH : 1080));
+            int applyW = Math.min(targetOutWidth, capW);
+            int applyH = Math.min(targetOutHeight, capH);
             if (applyW >= 1280 && applyH >= 720) {
                 getHolder().setFixedSize(applyW, applyH);
                 AppLogger.i("GPU", "UpscaleRenderer fixedSize=" + applyW + "x" + applyH + " mode=" + this.upscaleMode + " sharp=" + configuredSharpness);
@@ -241,17 +248,21 @@ public final class UpscaleRenderer extends GLSurfaceView
 
     @Override
     public void onFrameAvailable(SurfaceTexture st) {
-        frameAvailable = true;
+        pendingFrames.incrementAndGet();
         requestRender();
     }
 
     @Override
     public void onDrawFrame(GL10 gl) {
         long t0 = System.nanoTime();
-        if (frameAvailable && surfaceTexture != null) {
-            surfaceTexture.updateTexImage();
-            surfaceTexture.getTransformMatrix(stMatrix);
-            frameAvailable = false;
+        int pending = pendingFrames.getAndSet(0);
+        if (pending > 0 && surfaceTexture != null) {
+            try {
+                for (int i = 0; i < pending; i++) {
+                    surfaceTexture.updateTexImage();
+                }
+                surfaceTexture.getTransformMatrix(stMatrix);
+            } catch (Throwable ignored) {}
         }
 
         GLES20.glClearColor(0f, 0f, 0f, 1f);
@@ -283,13 +294,13 @@ public final class UpscaleRenderer extends GLSurfaceView
         float drawMs = (System.nanoTime() - t0) / 1_000_000.0f;
         avgGpuMs = (avgGpuMs == 0f) ? drawMs : (avgGpuMs * 0.9f + drawMs * 0.1f);
 
-        // Adaptive 60FPS protection on low-end TV Sticks
+        // Adaptive 60FPS protection on low-end TV Sticks & mobile GPUs
         if ("auto".equals(upscaleMode) && activeSharpness > 0.0f) {
-            if (drawMs > 13.5f) {
+            if (drawMs > 10.0f) {
                 slowFrameStreak++;
-                if (slowFrameStreak >= 12) {
+                if (slowFrameStreak >= 8) {
                     activeSharpness = 0.0f;
-                    AppLogger.w("GPU", "Modo Auto: GPU lenta (" + String.format("%.1f", avgGpuMs) + " ms), cambiando a filtro bilineal rapido para mantener 60FPS");
+                    AppLogger.w("GPU", "Modo Auto: GPU ocupada (" + String.format("%.1f", avgGpuMs) + " ms), cambiando a filtro bilineal rapido para mantener 60FPS");
                 }
             } else {
                 slowFrameStreak = 0;

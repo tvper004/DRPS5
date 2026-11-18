@@ -19,6 +19,7 @@ import java.util.Arrays;
     public interface InputTarget {
         void sendButtonEvent(int code, boolean pressed);
         void setSticks(short lx, short ly, short rx, short ry);
+        void sendTouchpadEvent(boolean down, int pointerId, int x, int y);
         void onMenuRequested();
     }
     private InputTarget target;
@@ -41,6 +42,11 @@ import java.util.Arrays;
         private float rStickCurX = 0, rStickCurY = 0;
         private int lStickPointerId = -1;
         private int rStickPointerId = -1;
+        private int touchpadPointerId = -1;
+        private float touchpadDownX = 0, touchpadDownY = 0;
+        private float touchpadCurX = 0, touchpadCurY = 0;
+        private float touchpadMaxDrag = 0;
+        private final RectF touchpadRect = new RectF();
 
         private final boolean[] touchBtnPressed = new boolean[256];
         private final int[] pointerAction = new int[32];
@@ -90,7 +96,7 @@ import java.util.Arrays;
         }
 
         private boolean hasActiveTouches() {
-            if (lStickPointerId != -1 || rStickPointerId != -1) return true;
+            if (lStickPointerId != -1 || rStickPointerId != -1 || touchpadPointerId != -1) return true;
             for (int p : pointerAction) {
                 if (p != -1) return true;
             }
@@ -164,18 +170,26 @@ import java.util.Arrays;
             density = getResources().getDisplayMetrics().density;
 
             lStickCx = 0.13f * w;
-            lStickCy = 0.74f * h;
+            lStickCy = 0.80f * h;
             lStickBaseR = 52f * density;
             lStickThumbR = 22f * density;
             lStickCurX = lStickCx;
             lStickCurY = lStickCy;
 
             rStickCx = 0.87f * w;
-            rStickCy = 0.74f * h;
+            rStickCy = 0.80f * h;
             rStickBaseR = 52f * density;
             rStickThumbR = 22f * density;
             rStickCurX = rStickCx;
             rStickCurY = rStickCy;
+
+            float topY = Math.max(20f * density, 0.052f * h);
+            touchpadRect.set(
+                0.365f * w,
+                Math.max(6f * density, topY - 17f * density),
+                0.635f * w,
+                Math.max(topY + 40f * density, 0.34f * h)
+            );
         }
 
         @Override
@@ -186,7 +200,7 @@ import java.util.Arrays;
             int saveCount = canvas.saveLayerAlpha(0f, 0f, (float) w, (float) h, (int) (overlayAlpha * 255f));
             try {
                 // Fila superior: Gatillos y Botones de Sistema en una franja limpia
-                float topY = Math.max(22f * density, 0.055f * h);
+                float topY = Math.max(20f * density, 0.052f * h);
                 float shW = 32f * density;
                 float shH = 18f * density;
 
@@ -194,20 +208,26 @@ import java.util.Arrays;
                 drawCapsule(canvas, 0.08f * w, topY, shW, shH, "L1", 0x84);
                 drawCapsule(canvas, 0.18f * w, topY, shW, shH, "L2", 0x86);
 
-                // 2. Botones de Sistema: SHARE, TOUCHPAD, OPTION
-                drawCapsule(canvas, 0.35f * w, topY, 28f * density, 16f * density, "SHARE", 0x8D);
-                drawCapsule(canvas, 0.50f * w, topY, 52f * density, 18f * density, "TOUCHPAD", 0x91);
-                drawCapsule(canvas, 0.65f * w, topY, 28f * density, 16f * density, "OPT", 0x8C);
+                // 2. Botones de Sistema: SHARE, TOUCHPAD (amplio y táctil), OPTION
+                drawCapsule(canvas, 0.30f * w, topY, 26f * density, 15f * density, "SHARE", 0x8D);
+                boolean tpActive = (touchpadPointerId != -1) || touchBtnPressed[0x91];
+                canvas.drawRoundRect(touchpadRect, 14f * density, 14f * density, tpActive ? pressedBgPaint : bgPaint);
+                canvas.drawRoundRect(touchpadRect, 14f * density, 14f * density, borderPaint);
+                canvas.drawText("TOUCHPAD", touchpadRect.centerX(), touchpadRect.top + 19f * density, textPaint);
+                if (touchpadPointerId != -1) {
+                    canvas.drawCircle(touchpadCurX, touchpadCurY, 10f * density, borderPaint);
+                }
+                drawCapsule(canvas, 0.70f * w, topY, 26f * density, 15f * density, "OPT", 0x8C);
 
                 // 3. Shoulders: R2 y R1 horizontales a la derecha
                 drawCapsule(canvas, 0.82f * w, topY, shW, shH, "R2", 0x87);
                 drawCapsule(canvas, 0.92f * w, topY, shW, shH, "R1", 0x85);
 
-                // 4. CRUCETA D-PAD (Limpia y con amplio margen vertical respecto a L2)
+                // 4. CRUCETA D-PAD (Centrada 50/50 entre L1/L2 y el análogo izquierdo)
                 float dpadCx = 0.13f * w;
-                float dpadCy = 0.44f * h;
+                float dpadCy = 0.38f * h;
                 float dpadR = 23f * density;
-                float dpadOffset = 34f * density;
+                float dpadOffset = 38f * density;
                 drawRoundButton(canvas, dpadCx, dpadCy - dpadOffset, dpadR, 0x80); // UP
                 drawArrow(canvas, dpadCx, dpadCy - dpadOffset, dpadR * 0.45f, 0);
                 drawRoundButton(canvas, dpadCx, dpadCy + dpadOffset, dpadR, 0x81); // DOWN
@@ -217,11 +237,11 @@ import java.util.Arrays;
                 drawRoundButton(canvas, dpadCx + dpadOffset, dpadCy, dpadR, 0x83); // RIGHT
                 drawArrow(canvas, dpadCx + dpadOffset, dpadCy, dpadR * 0.45f, 90);
 
-                // 5. BOTONES DE ACCIÓN PERSONALIZADOS (Limpia y con amplio margen vertical respecto a R2)
+                // 5. BOTONES DE ACCIÓN PERSONALIZADOS (Centrados 50/50 entre R1/R2 y el análogo derecho)
                 float actCx = 0.87f * w;
-                float actCy = 0.44f * h;
+                float actCy = 0.38f * h;
                 float actR = 23f * density;
-                float actSpread = 36f * density;
+                float actSpread = 40f * density;
 
                 // Abajo: Cruz recta (+) [0x88]
                 float crossX = actCx, crossY = actCy + actSpread;
@@ -382,6 +402,21 @@ import java.util.Arrays;
                 return;
             }
 
+            if (touchpadRect.contains(x, y) && touchpadPointerId == -1) {
+                touchpadPointerId = pId;
+                pointerAction[actIdx] = -4;
+                touchpadDownX = x;
+                touchpadDownY = y;
+                touchpadCurX = x;
+                touchpadCurY = y;
+                touchpadMaxDrag = 0f;
+                try { performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); } catch (Throwable ignored) {}
+                if (target != null) {
+                    target.sendTouchpadEvent(true, 0, tpCoordX(x), tpCoordY(y));
+                }
+                return;
+            }
+
             int hitBtn = hitTestButton(x, y);
             if (hitBtn != -1) {
                 touchBtnPressed[hitBtn] = true;
@@ -406,11 +441,31 @@ import java.util.Arrays;
             }
         }
 
+        private int tpCoordX(float x) {
+            float rw = Math.max(1f, touchpadRect.width());
+            float norm = Math.max(0f, Math.min(1f, (x - touchpadRect.left) / rw));
+            return Math.round(norm * 1919f);
+        }
+
+        private int tpCoordY(float y) {
+            float rh = Math.max(1f, touchpadRect.height());
+            float norm = Math.max(0f, Math.min(1f, (y - touchpadRect.top) / rh));
+            return Math.round(norm * 941f);
+        }
+
         private void handlePointerMove(int pId, float x, float y) {
             if (pId == lStickPointerId) {
                 updateLeftStick(x, y);
             } else if (pId == rStickPointerId) {
                 updateRightStick(x, y);
+            } else if (pId == touchpadPointerId) {
+                touchpadCurX = Math.max(touchpadRect.left, Math.min(touchpadRect.right, x));
+                touchpadCurY = Math.max(touchpadRect.top, Math.min(touchpadRect.bottom, y));
+                float drag = (float) Math.hypot(touchpadCurX - touchpadDownX, touchpadCurY - touchpadDownY);
+                if (drag > touchpadMaxDrag) touchpadMaxDrag = drag;
+                if (target != null) {
+                    target.sendTouchpadEvent(true, 0, tpCoordX(touchpadCurX), tpCoordY(touchpadCurY));
+                }
             }
         }
 
@@ -431,6 +486,17 @@ import java.util.Arrays;
                 touchRx = 0; touchRy = 0;
                 if (target != null) {
                     target.setSticks(touchLx, touchLy, touchRx, touchRy);
+                }
+            } else if (pId == touchpadPointerId) {
+                touchpadPointerId = -1;
+                if (target != null) {
+                    target.sendTouchpadEvent(false, 0, tpCoordX(touchpadCurX), tpCoordY(touchpadCurY));
+                    if (touchpadMaxDrag < 14f * density) {
+                        target.sendButtonEvent(0x91, true);
+                        postDelayed(() -> {
+                            if (target != null) target.sendButtonEvent(0x91, false);
+                        }, 90);
+                    }
                 }
             } else {
                 int code = pointerAction[actIdx];
@@ -488,33 +554,32 @@ import java.util.Arrays;
 
         private int hitTestButton(float x, float y) {
             float dpadCx = 0.13f * w;
-            float dpadCy = 0.44f * h;
+            float dpadCy = 0.38f * h;
             float dpadR = 28f * density;
-            float dpadOffset = 34f * density;
+            float dpadOffset = 38f * density;
             if (Math.hypot(x - dpadCx, y - (dpadCy - dpadOffset)) <= dpadR) return 0x80; // UP
             if (Math.hypot(x - dpadCx, y - (dpadCy + dpadOffset)) <= dpadR) return 0x81; // DOWN
             if (Math.hypot(x - (dpadCx - dpadOffset), y - dpadCy) <= dpadR) return 0x82; // LEFT
             if (Math.hypot(x - (dpadCx + dpadOffset), y - dpadCy) <= dpadR) return 0x83; // RIGHT
 
             float actCx = 0.87f * w;
-            float actCy = 0.44f * h;
+            float actCy = 0.38f * h;
             float actR = 28f * density;
-            float actSpread = 36f * density;
+            float actSpread = 40f * density;
             if (Math.hypot(x - actCx, y - (actCy + actSpread)) <= actR) return 0x88; // Cruz (+)
             if (Math.hypot(x - (actCx - actSpread), y - actCy) <= actR) return 0x8A; // L invertida
             if (Math.hypot(x - (actCx + actSpread), y - actCy) <= actR) return 0x89; // Medialuna
             if (Math.hypot(x - actCx, y - (actCy - actSpread)) <= actR) return 0x8B; // Angulo 45
 
-            float topY = Math.max(22f * density, 0.055f * h);
+            float topY = Math.max(20f * density, 0.052f * h);
             float shW = 34f * density, shH = 22f * density;
             if (Math.abs(x - 0.08f * w) <= shW && Math.abs(y - topY) <= shH) return 0x84; // L1
             if (Math.abs(x - 0.18f * w) <= shW && Math.abs(y - topY) <= shH) return 0x86; // L2
             if (Math.abs(x - 0.82f * w) <= shW && Math.abs(y - topY) <= shH) return 0x87; // R2
             if (Math.abs(x - 0.92f * w) <= shW && Math.abs(y - topY) <= shH) return 0x85; // R1
 
-            if (Math.abs(x - 0.35f * w) <= 32f * density && Math.abs(y - topY) <= 18f * density) return 0x8D; // SHARE
-            if (Math.abs(x - 0.50f * w) <= 56f * density && Math.abs(y - topY) <= 20f * density) return 0x91; // TOUCHPAD
-            if (Math.abs(x - 0.65f * w) <= 32f * density && Math.abs(y - topY) <= 18f * density) return 0x8C; // OPTIONS
+            if (Math.abs(x - 0.30f * w) <= 30f * density && Math.abs(y - topY) <= 18f * density) return 0x8D; // SHARE
+            if (Math.abs(x - 0.70f * w) <= 30f * density && Math.abs(y - topY) <= 18f * density) return 0x8C; // OPTIONS
 
             if (Math.hypot(x - (lStickCx + lStickBaseR + 24f * density), y - lStickCy) <= 22f * density) return 0x8F; // L3
             if (Math.hypot(x - (rStickCx - rStickBaseR - 24f * density), y - rStickCy) <= 22f * density) return 0x90; // R3

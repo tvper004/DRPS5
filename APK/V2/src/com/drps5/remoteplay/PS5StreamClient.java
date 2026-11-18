@@ -53,6 +53,13 @@ public final class PS5StreamClient {
         this.bitrateKbps = Math.max(0, kbps);
     }
 
+    public void requestRecoveryIdr() {
+        if (running.get()) {
+            waitingForIdr = true;
+            sendIdrRequest();
+        }
+    }
+
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Object sendLock = new Object();
     private int totalPacketsReceived = 0;
@@ -76,6 +83,8 @@ public final class PS5StreamClient {
     private Thread audioDrainThread;
     private static final byte[] decAudioBuf = new byte[4096];
     private final Object audioWakeLock = new Object();
+    private final Object codecLock = new Object();
+    private volatile int consecutiveFeedTimeouts = 0;
 
     private PS5Crypto.SessionCipher sessionCipher;
     private byte[] sessionId;
@@ -219,8 +228,12 @@ public final class PS5StreamClient {
     private final ByteBuffer fbEventPktWrap = ByteBuffer.wrap(fbEventPktBuf);
     private final byte[] fbStatePktBuf = new byte[12 + 28];
     private final ByteBuffer fbStatePktWrap = ByteBuffer.wrap(fbStatePktBuf);
+    private final byte[] fbTouchPlain = new byte[5];
+    private final byte[] fbTouchPktBuf = new byte[12 + 5];
+    private final ByteBuffer fbTouchPktWrap = ByteBuffer.wrap(fbTouchPktBuf);
     private DatagramPacket fbEventDatagram;
     private DatagramPacket fbStateDatagram;
+    private DatagramPacket fbTouchDatagram;
 
     private static final byte[] DID_PREFIX = new byte[]{0x00, 0x18, 0x00, 0x00, 0x00, 0x07, 0x00, 0x40, 0x00, (byte) 0x80};
     private static final byte[] HB_RESP_PAYLOAD = new byte[]{0x00, 0x00, 0x00, 0x00, 0x01, (byte) 0xFE, 0x00, 0x00};
@@ -880,7 +893,7 @@ public final class PS5StreamClient {
             w = 640; h = 360;
         }
         MediaFormat fmt = MediaFormat.createVideoFormat(mime, w, h);
-        fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1536 * 1024);
+        fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024);
         fmt.setInteger(MediaFormat.KEY_PRIORITY, 0);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             fmt.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE);
@@ -915,7 +928,7 @@ public final class PS5StreamClient {
                 try { videoCodec.release(); } catch (Throwable ignored) {}
             }
             MediaFormat basicFmt = MediaFormat.createVideoFormat(mime, w, h);
-            basicFmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1536 * 1024);
+            basicFmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024);
             basicFmt.setInteger(MediaFormat.KEY_PRIORITY, 0);
             videoCodec = MediaCodec.createDecoderByType(mime);
             videoCodec.configure(basicFmt, surface, null, 0);
@@ -946,11 +959,44 @@ public final class PS5StreamClient {
                     android.util.Log.i("DRPS5", "Video decoder nuevo formato de salida: " + newFmt);
                 }
             } catch (IllegalStateException e) {
-                break;
+                try { Thread.sleep(25); } catch (InterruptedException ie) { break; }
             } catch (Exception e) {
                 android.util.Log.w("DRPS5", "Excepción en bucle de drenaje de vídeo: " + e.getMessage());
             }
         }
+    }
+
+    private void recoverVideoDecoder(boolean hardReset) {
+        synchronized (codecLock) {
+            if (!running.get()) return;
+            boolean needRecreate = hardReset || videoCodec == null;
+            if (!needRecreate) {
+                try {
+                    videoCodec.flush();
+                    android.util.Log.w("DRPS5", "🔄 MediaCodec flush de recuperación ejecutado");
+                } catch (Throwable t) {
+                    android.util.Log.w("DRPS5", "MediaCodec flush falló, recreando decodificador: " + t.getMessage());
+                    needRecreate = true;
+                }
+            }
+            if (needRecreate) {
+                try {
+                    if (videoCodec != null) {
+                        try { videoCodec.stop(); } catch (Throwable ignored) {}
+                        try { videoCodec.release(); } catch (Throwable ignored) {}
+                        videoCodec = null;
+                    }
+                    initMediaCodec();
+                    android.util.Log.w("DRPS5", "🔄 MediaCodec recreado tras bloqueo");
+                } catch (Throwable t) {
+                    android.util.Log.e("DRPS5", "Error recreando MediaCodec: " + t.getMessage());
+                }
+            }
+            waitingForIdr = true;
+            nextDeliveryFrame = -1;
+            consecutiveFeedTimeouts = 0;
+        }
+        sendIdrRequest();
     }
 
     private void initAudio() {
@@ -1495,6 +1541,10 @@ public final class PS5StreamClient {
                     boolean isIdr = isIdrFrame(assembledFrameBuf, rawLen);
                     if (isIdr) {
                         waitingForIdr = false;
+                    } else if (waitingForIdr) {
+                        nextDeliveryFrame = targetFrame;
+                        targetFrameWaitStartTime = System.currentTimeMillis();
+                        continue;
                     }
                     nextDeliveryFrame = targetFrame;
                     targetFrameWaitStartTime = System.currentTimeMillis();
@@ -1574,6 +1624,7 @@ public final class PS5StreamClient {
                 if (inIdx >= 0) break;
             }
             if (inIdx >= 0) {
+                consecutiveFeedTimeouts = 0;
                 ByteBuffer inBuf = codec.getInputBuffer(inIdx);
                 if (inBuf != null) {
                     inBuf.clear();
@@ -1581,6 +1632,9 @@ public final class PS5StreamClient {
                     int totalLen = hdrLen + rawLen;
                     if (totalLen > inBuf.remaining()) {
                         codec.queueInputBuffer(inIdx, 0, 0, 0, 0);
+                        android.util.Log.w("DRPS5", "⚠️ Frame excede buffer MediaCodec (" + totalLen + " > " + inBuf.remaining() + "), solicitando IDR");
+                        waitingForIdr = true;
+                        sendIdrRequest();
                         return;
                     }
                     if (hdrLen > 0) {
@@ -1590,8 +1644,13 @@ public final class PS5StreamClient {
                     codec.queueInputBuffer(inIdx, 0, totalLen, System.nanoTime() / 1000, 0);
                 }
             } else {
-                notifyCorruptFrame(Math.max(0, nextDeliveryFrame), Math.max(0, highestReceivedFrame));
-                sendIdrRequest();
+                consecutiveFeedTimeouts++;
+                if (consecutiveFeedTimeouts >= 5) {
+                    recoverVideoDecoder(true);
+                } else {
+                    notifyCorruptFrame(Math.max(0, nextDeliveryFrame), Math.max(0, highestReceivedFrame));
+                    sendIdrRequest();
+                }
             }
         } catch (Exception ignored) {}
     }
@@ -1748,11 +1807,26 @@ public final class PS5StreamClient {
             // Watchdog anticongelamiento (reacción tras 500ms de 0 FPS con tráfico continuo)
             if (tickDf == 0 && tickDeltaPkts > 10) {
                 zeroFpsTicks++;
-                if (zeroFpsTicks >= 2 && now - lastIdrReqTime > 500) {
+                if (zeroFpsTicks >= 16 && frames > 0) {
                     lastIdrReqTime = now;
+                    zeroFpsTicks = 0;
+                    android.util.Log.w("DRPS5", "🚨 Stall crítico (4s sin frames): recreando decodificador MediaCodec...");
+                    recoverVideoDecoder(true);
+                } else if (zeroFpsTicks == 10 && frames > 0) {
+                    lastIdrReqTime = now;
+                    android.util.Log.w("DRPS5", "🔄 Stall persistente (2.5s sin frames): ejecutando flush de MediaCodec...");
+                    recoverVideoDecoder(false);
+                } else if (zeroFpsTicks >= 2 && now - lastIdrReqTime > 500) {
+                    lastIdrReqTime = now;
+                    if (zeroFpsTicks >= 7 && frames > 0) {
+                        waitingForIdr = true;
+                        nextDeliveryFrame = -1;
+                        android.util.Log.w("DRPS5", "⚡ Stall Watchdog: 0 FPS (" + (zeroFpsTicks * 250) + "ms). Reiniciando reensamblado a espera de IDR...");
+                    } else {
+                        android.util.Log.w("DRPS5", "⚡ Fast Recovery: 0 FPS (" + (zeroFpsTicks * 250) + "ms). Solicitando IDR de recuperación...");
+                    }
                     notifyCorruptFrame( Math.max(0, nextDeliveryFrame), Math.max(0, highestReceivedFrame) );
                     sendIdrRequest();
-                    android.util.Log.w("DRPS5", "⚡ Fast Recovery: 0 FPS (" + (zeroFpsTicks * 250) + "ms). Solicitando IDR de recuperación...");
                 }
             } else {
                 zeroFpsTicks = 0;
@@ -1972,6 +2046,28 @@ public final class PS5StreamClient {
         this.leftY = ly;
         this.rightX = rx;
         this.rightY = ry;
+    }
+
+    public void sendTouchpadEvent(boolean down, int pointerId, int x, int y) {
+        if (streamCipher == null || udpSocket == null) return;
+        int cx = Math.max(0, Math.min(1919, x));
+        int cy = Math.max(0, Math.min(941, y));
+        synchronized (sendLock) {
+            try {
+                if (fbTouchDatagram == null && hostAddress != null) {
+                    fbTouchDatagram = new DatagramPacket(fbTouchPktBuf, fbTouchPktBuf.length, hostAddress, 9296);
+                }
+                fbTouchPlain[0] = (byte) (down ? 0xD0 : 0xC0);
+                fbTouchPlain[1] = (byte) (pointerId & 0x7F);
+                fbTouchPlain[2] = (byte) ((cx >> 4) & 0xFF);
+                fbTouchPlain[3] = (byte) (((cx & 0x0F) << 4) | ((cy >> 8) & 0x0F));
+                fbTouchPlain[4] = (byte) (cy & 0xFF);
+                feedbackSeqEvent = (feedbackSeqEvent + 1) & 0xFFFF;
+                sendFeedbackPacketZeroAllocLocked(0x01, feedbackSeqEvent, fbTouchPlain, fbTouchPktBuf, fbTouchPktWrap, fbTouchDatagram);
+            } catch (Exception e) {
+                android.util.Log.w("DRPS5", "Error enviando touchpad: " + e.getMessage());
+            }
+        }
     }
 
     private void sendControllerState() {
