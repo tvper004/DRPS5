@@ -348,12 +348,10 @@ class AVStream:
         self._callback_corrupt = callback_corrupt
         self._session = session
         self._header = header or b""
-        self._units = {}       # {unit_index: bytes (payload without 2-byte pad header)}
-        self._raw_units = {}   # {unit_index: bytes (full decrypted unit including 2-byte pad header)}
-        self._fec_block_size = 0
+        self._slots = {}       # {frame_index: {"src": int, "fec": int, "units": dict, "raw": dict, "blk": int}}
+        self._delivered_ring = []
+        self._delivered_set = set()
         self._frame = -1
-        self._frame_length_src = 0
-        self._frame_length_fec = 0
         self._last_complete = -1
         self._lost = 0
         self._received = 0
@@ -367,99 +365,118 @@ class AVStream:
         """Reset packet counters."""
         self._lost = self._received = 0
 
+    def _mark_delivered(self, frame_idx: int):
+        if frame_idx not in self._delivered_set:
+            self._delivered_set.add(frame_idx)
+            self._delivered_ring.append(frame_idx)
+            if len(self._delivered_ring) > 96:
+                old = self._delivered_ring.pop(0)
+                self._delivered_set.discard(old)
+
+    def _deliver_assembled_frame(self, frame_idx: int, src_count: int, units: dict):
+        # Entregar cualquier fotograma anterior en ventana si ya estaba completo, o descartar slots obsoletos
+        for old_idx in list(self._slots.keys()):
+            if old_idx != frame_idx and ((frame_idx - old_idx) & 0xFFFF) < 16384:
+                old_slot = self._slots.pop(old_idx, None)
+                if old_slot:
+                    lost_cnt = max(0, old_slot["src"] - len(old_slot["units"]))
+                    self._lost += lost_cnt
+                    if self._type == AVStream.TYPE_VIDEO and self._callback_corrupt:
+                        expected_next = (self._last_complete + 1) & 0xFFFF if self._last_complete >= 0 else old_idx
+                        self._callback_corrupt(expected_next, old_idx)
+
+        self._slots.pop(frame_idx, None)
+        self._mark_delivered(frame_idx)
+        assembled = b"".join(units[i] for i in range(src_count))
+
+        if self._type == AVStream.TYPE_VIDEO:
+            codec_name = getattr(self._session, "codec", "hevc") if self._session else "hevc"
+            is_idr = is_idr_frame(assembled, codec_name)
+            if self._waiting_for_idr:
+                if is_idr:
+                    _LOGGER.info("🎉 IDR Keyframe recibido y validado (frame %s). Reanudando vídeo...", frame_idx)
+                    self._waiting_for_idr = False
+                    self._last_complete = frame_idx
+                    frame_data = self._header + assembled if self._header else assembled
+                    self._callback_done(frame_data)
+                else:
+                    now_t = time.time()
+                    if now_t - self._last_idr_req_time > 0.12:
+                        self._last_idr_req_time = now_t
+                        if self._session and hasattr(self._session, "stream") and hasattr(self._session.stream, "send_idr_request"):
+                            self._session.stream.send_idr_request()
+                    return
+            else:
+                self._last_complete = frame_idx
+                frame_data = self._header + assembled if self._header else assembled
+                self._callback_done(frame_data)
+        else:
+            self._last_complete = frame_idx
+            self._callback_done(assembled)
+
     def handle(self, packet: AVPacket):
-        """Reensambla fotogramas por índice de unidad con soporte FEC Cauchy Reed-Solomon para 60 FPS fluidos."""
+        """Reensambla fotogramas con ventana multi-slot (6 frames) + FEC Cauchy Reed-Solomon sin pérdidas por jitter."""
         self._received += 1
         if self._received > 65535:
             self._received = 1
 
-        # Ignorar paquetes tardíos o de paridad FEC de un fotograma ya completado
-        if self._last_complete >= 0 and ((self._last_complete - packet.frame_index) & 0xFFFF) < 16384:
+        f_idx = packet.frame_index
+        if f_idx in self._delivered_set:
             return
-
-        # Nuevo fotograma
-        if packet.frame_index != self._frame:
-            if self._frame >= 0 and self._last_complete != self._frame:
-                lost_cnt = max(0, self._frame_length_src - len(self._units))
-                self._lost += lost_cnt
-                if self._type == AVStream.TYPE_VIDEO and self._last_complete < 0:
-                    self._waiting_for_idr = True
-                if self._callback_corrupt:
-                    expected_next = (self._last_complete + 1) & 0xFFFF
-                    self._callback_corrupt(expected_next, (packet.frame_index - 1) & 0xFFFF)
-
-            self._frame = packet.frame_index
-            self._frame_length_src = packet.frame_length_src
-            self._frame_length_fec = packet.frame_length_fec
-            self._units = {}
-            self._raw_units = {}
-            self._fec_block_size = 0
-
-        if self._last_complete == self._frame:
+        if self._last_complete >= 0 and ((self._last_complete - f_idx) & 0xFFFF) < 16384:
             return
-
         if len(packet.data) < 2:
             return
 
-        self._raw_units[packet.unit_index] = packet.data
-        if not packet.is_fec and packet.unit_index < packet.frame_length_src:
-            self._units[packet.unit_index] = packet.data[2:]
+        if self._frame < 0 or ((f_idx - self._frame) & 0xFFFF) < 16384:
+            self._frame = f_idx
+
+        slot = self._slots.get(f_idx)
+        if slot is None:
+            # Limitar ventana de reordenamiento a 6 fotogramas en vuelo
+            if len(self._slots) >= 6:
+                oldest_idx = min(self._slots.keys(), key=lambda k: (k - f_idx) & 0xFFFF if ((f_idx - k) & 0xFFFF) >= 16384 else -((f_idx - k) & 0xFFFF))
+                old_slot = self._slots.pop(oldest_idx, None)
+                if old_slot:
+                    self._lost += max(0, old_slot["src"] - len(old_slot["units"]))
+                    if self._type == AVStream.TYPE_VIDEO and self._last_complete < 0:
+                        self._waiting_for_idr = True
+                    if self._callback_corrupt:
+                        expected_next = (self._last_complete + 1) & 0xFFFF if self._last_complete >= 0 else oldest_idx
+                        self._callback_corrupt(expected_next, oldest_idx)
+            slot = {
+                "src": packet.frame_length_src,
+                "fec": packet.frame_length_fec,
+                "units": {},
+                "raw": {},
+                "blk": 0,
+            }
+            self._slots[f_idx] = slot
+
+        u_idx = packet.unit_index
+        if u_idx in slot["raw"]:
+            return
+        slot["raw"][u_idx] = packet.data
+        if not packet.is_fec and u_idx < slot["src"]:
+            slot["units"][u_idx] = packet.data[2:]
             pad_val = (packet.data[0] << 8) | packet.data[1]
             if pad_val >= 0:
-                self._fec_block_size = len(packet.data) + pad_val
-        elif packet.is_fec and self._fec_block_size == 0:
-            self._fec_block_size = len(packet.data)
+                slot["blk"] = len(packet.data) + pad_val
+        elif packet.is_fec and slot["blk"] == 0:
+            slot["blk"] = len(packet.data)
 
-        # Intentar recuperación FEC si faltan paquetes fuente pero ya llegaron suficientes paridades FEC
         if (
-            len(self._units) < packet.frame_length_src
-            and len(self._raw_units) >= packet.frame_length_src
-            and self._fec_block_size > 2
+            len(slot["units"]) < slot["src"]
+            and len(slot["raw"]) >= slot["src"]
+            and slot["blk"] > 2
         ):
-            if recover_fec_units(
-                self._raw_units,
-                packet.frame_length_src,
-                packet.frame_length_fec,
-                self._fec_block_size,
-            ):
-                for idx in range(packet.frame_length_src):
-                    if idx not in self._units and idx in self._raw_units:
-                        self._units[idx] = self._raw_units[idx][2:]
+            if recover_fec_units(slot["raw"], slot["src"], slot["fec"], slot["blk"]):
+                for idx in range(slot["src"]):
+                    if idx not in slot["units"] and idx in slot["raw"]:
+                        slot["units"][idx] = slot["raw"][idx][2:]
 
-        # Si se han completado todas las unidades fuente del fotograma
-        if len(self._units) == packet.frame_length_src:
-            assembled = b"".join(self._units[i] for i in range(packet.frame_length_src))
-
-            if self._type == AVStream.TYPE_VIDEO:
-                codec_name = getattr(self._session, "codec", "hevc") if self._session else "hevc"
-                is_idr = is_idr_frame(assembled, codec_name)
-
-                if self._waiting_for_idr:
-                    if is_idr:
-                        _LOGGER.info("🎉 IDR Keyframe recibido y validado (frame %s). Reanudando vídeo...", self._frame)
-                        self._waiting_for_idr = False
-                        self._last_complete = self._frame
-                        frame_data = self._header + assembled if self._header else assembled
-                        self._callback_done(frame_data)
-                    else:
-                        now_t = time.time()
-                        if now_t - self._last_idr_req_time > 0.12:
-                            self._last_idr_req_time = now_t
-                            if self._session and hasattr(self._session, "stream") and hasattr(self._session.stream, "send_idr_request"):
-                                self._session.stream.send_idr_request()
-                        self._units.clear()
-                        self._raw_units.clear()
-                        return
-                else:
-                    self._last_complete = self._frame
-                    frame_data = self._header + assembled if self._header else assembled
-                    self._callback_done(frame_data)
-            else:
-                self._last_complete = self._frame
-                self._callback_done(assembled)
-
-            self._units.clear()
-            self._raw_units.clear()
+        if len(slot["units"]) == slot["src"] and slot["src"] > 0:
+            self._deliver_assembled_frame(f_idx, slot["src"], slot["units"])
 
     @property
     def frame(self) -> int:

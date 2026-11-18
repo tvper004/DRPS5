@@ -28,8 +28,8 @@ class Controller:
         TAP = auto()
 
     MAX_EVENTS = 5
-    STATE_INTERVAL_MAX_MS = 0.200
-    STATE_INTERVAL_MIN_MS = 0.100
+    STATE_INTERVAL_MAX_MS = 0.064
+    STATE_INTERVAL_MIN_MS = 0.0075
 
     @staticmethod
     def buttons() -> list:
@@ -130,25 +130,24 @@ class Controller:
         self._session = None
 
     def update_sticks(self):
-        """Send controller stick state to host con tolerancia a pérdidas UDP."""
+        """Send controller stick state to host con ritmo de hasta ~125Hz y tolerancia a pérdidas UDP."""
         try:
             if not self._check_session() or not getattr(self._session, "stream", None):
                 return
             with self._stick_lock:
                 now = time.time()
-                # Enviar si el estado cambió O como heartbeat cada 80ms para mantener vivo el mando
                 state_changed = (self.stick_state != self._last_state)
-                if not state_changed and (now - self._last_state_time < 0.080):
+                is_centered = (self.stick_state.left.x == 0 and self.stick_state.left.y == 0 and
+                               self.stick_state.right.x == 0 and self.stick_state.right.y == 0)
+                if not state_changed and (now - self._last_state_time < 0.064):
+                    return
+                if state_changed and not is_centered and (now - self._last_state_time < self.STATE_INTERVAL_MIN_MS):
                     return
                 self._last_state_time = now
                 self._last_state.left = StickState(self.stick_state.left.x, self.stick_state.left.y)
                 self._last_state.right = StickState(self.stick_state.right.x, self.stick_state.right.y)
 
-                # Si el stick está en reposo centrado (0, 0), enviar con triple redundancia
-                # para que la PS5 NUNCA se quede con un stick desplazado por un paquete perdido
-                is_centered = (self.stick_state.left.x == 0 and self.stick_state.left.y == 0 and
-                               self.stick_state.right.x == 0 and self.stick_state.right.y == 0)
-                repeats = 3 if (state_changed and is_centered) else (2 if state_changed else 1)
+                repeats = 3 if (state_changed and is_centered) else 1
                 for _ in range(repeats):
                     self._session.stream.send_feedback(
                         FeedbackHeader.Type.STATE, self._sequence_state, state=self.stick_state
@@ -156,6 +155,28 @@ class Controller:
                     self._sequence_state = (self._sequence_state + 1) & 0xFFFF
         except Exception as error:
             _LOGGER.debug("Error enviando estado de sticks: %s", error)
+
+    def touchpad(self, down: bool, pointer_id: int = 0, x: int = 960, y: int = 470, repeats: int = 1):
+        """Send 5-byte PS5 Takion touchpad coordinate event (0..1919, 0..941)."""
+        try:
+            if not self._check_session() or not getattr(self._session, "stream", None):
+                return
+            cx = max(0, min(1919, int(x)))
+            cy = max(0, min(941, int(y)))
+            data = bytes([
+                0xD0 if down else 0xC0,
+                pointer_id & 0x7F,
+                (cx >> 4) & 0xFF,
+                ((cx & 0x0F) << 4) | ((cy >> 8) & 0x0F),
+                cy & 0xFF,
+            ])
+            for _ in range(max(1, repeats)):
+                self._session.stream.send_feedback(
+                    FeedbackHeader.Type.EVENT, self._sequence_event, data=data, count=1
+                )
+                self._sequence_event = (self._sequence_event + 1) & 0xFFFF
+        except Exception as error:
+            _LOGGER.debug("Error enviando touchpad: %s", error)
 
     def _send_event(self):
         """Send controller button event con triple redundancia UDP limpia sin arrastrar eventos antiguos."""

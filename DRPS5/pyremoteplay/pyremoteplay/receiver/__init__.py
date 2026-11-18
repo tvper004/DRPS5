@@ -162,8 +162,8 @@ class AVReceiver(abc.ABC):
             pass
 
         try:
-            codec_ctx.thread_type = av.codec.context.ThreadType.AUTO
-            codec_ctx.thread_count = 0
+            codec_ctx.thread_type = av.codec.context.ThreadType.SLICE
+            codec_ctx.thread_count = 4
         except Exception:
             pass
         return codec_ctx

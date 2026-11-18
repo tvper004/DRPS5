@@ -17,11 +17,32 @@ if sys.platform == "darwin":
         pass
 
 import time
+import math
+import ctypes
 import threading
 import queue
 import logging
 import asyncio
 from typing import Optional
+
+# Carga opcional del acelerador nativo Universal C/SIMD Contrast Adaptive Sharpening (CAS)
+_CAS_LIB = None
+for _cas_cand in (
+    os.path.join(os.environ.get("DRPS5_RESOURCES_DIR", ""), "libdrps5_cas.dylib"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "libdrps5_cas.dylib"),
+    "/Applications/DRPS5.app/Contents/Resources/libdrps5_cas.dylib",
+):
+    if _cas_cand and os.path.exists(_cas_cand):
+        try:
+            _CAS_LIB = ctypes.CDLL(_cas_cand)
+            _CAS_LIB.drps5_cas_rgb24.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int
+            ]
+            _CAS_LIB.drps5_cas_rgb24.restype = None
+            break
+        except Exception:
+            _CAS_LIB = None
 
 # Configuración de base de datos de mandos SDL2 (Universal GameControllerDB)
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -208,11 +229,14 @@ def get_macos_default_audio_output_device():
 
 
 class DRPS5Receiver(AVReceiver):
-    """Receptor AV de ultra-baja latencia para la pantalla remota de la PS5 con cambio dinámico de audio."""
+    """Receptor AV de ultra-baja latencia para la pantalla remota de la PS5 con cambio dinámico de audio y CAS SIMD."""
 
-    def __init__(self, audio_enabled: bool = True):
+    def __init__(self, audio_enabled: bool = True, cas_strength: int = 0):
         super().__init__()
         self.audio_enabled = audio_enabled
+        self.cas_strength = max(0, min(255, int(cas_strength or 0)))
+        self._cas_buf: Optional[bytearray] = None
+        self._cas_c_dst = None
         self.frame_queue = queue.Queue(maxsize=2)
         self.audio_queue = queue.Queue(maxsize=150)
         self.audio_stream: Optional[sd.RawOutputStream] = None
@@ -407,17 +431,41 @@ class DRPS5Receiver(AVReceiver):
         """Llamado inmediatamente cuando un fotograma de vídeo H.264/HEVC es decodificado."""
         try:
             if getattr(frame.format, "name", "") == "rgb24":
-                raw_bytes = frame.planes[0]
+                plane = frame.planes[0]
                 w, h = frame.width, frame.height
             else:
                 img = frame.to_rgb()
-                raw_bytes = img.planes[0]
+                plane = img.planes[0]
                 w, h = img.width, img.height
 
             self.frame_width = w
             self.frame_height = h
+            stride = getattr(plane, "line_size", w * 3)
+            tight_size = w * h * 3
 
-            surface = pygame.image.frombuffer(raw_bytes, (w, h), "RGB")
+            if _CAS_LIB is not None and (self.cas_strength > 0 or stride != w * 3):
+                # Doble búfer alterno para evitar tearing mientras el hilo principal lee el Surface anterior
+                if not hasattr(self, "_cas_ring") or self._cas_ring_size != tight_size:
+                    self._cas_ring = [bytearray(tight_size), bytearray(tight_size)]
+                    self._cas_ptrs = [
+                        ctypes.addressof((ctypes.c_uint8 * tight_size).from_buffer(self._cas_ring[0])),
+                        ctypes.addressof((ctypes.c_uint8 * tight_size).from_buffer(self._cas_ring[1])),
+                    ]
+                    self._cas_idx = 0
+                    self._cas_ring_size = tight_size
+                slot_i = self._cas_idx
+                self._cas_idx ^= 1
+                src_ptr = getattr(plane, "buffer_ptr", None)
+                if src_ptr:
+                    _CAS_LIB.drps5_cas_rgb24(src_ptr, self._cas_ptrs[slot_i], w, h, stride, self.cas_strength)
+                    surface = pygame.image.frombuffer(self._cas_ring[slot_i], (w, h), "RGB")
+                else:
+                    surface = pygame.image.frombuffer(plane, (w, h), "RGB")
+            elif stride != w * 3:
+                arr = frame.to_ndarray(format="rgb24")
+                surface = pygame.image.frombuffer(arr.tobytes(), (w, h), "RGB")
+            else:
+                surface = pygame.image.frombuffer(plane, (w, h), "RGB")
 
             # Descartar fotograma antiguo si la cola está llena para latencia ultra-baja
             if self.frame_queue.full():
@@ -429,7 +477,7 @@ class DRPS5Receiver(AVReceiver):
 
             if not hasattr(self, "_logged_first_frame"):
                 self._logged_first_frame = True
-                logger.info(f"¡Primer fotograma de vídeo decodificado exitosamente! ({w}x{h})")
+                logger.info(f"¡Primer fotograma de vídeo decodificado exitosamente! ({w}x{h}, CAS={self.cas_strength})")
 
             self.fps_counter += 1
             now = time.time()
@@ -690,6 +738,20 @@ def run_drps5_stream(
     # Detección inicial de mandos
     refresh_all_controllers()
 
+    # Auto-detección de soporte real HDR/EDR en el monitor macOS para evitar lavado de color y 3x carga CPU en pantallas SDR
+    if hdr and sys.platform == "darwin":
+        try:
+            import AppKit
+            edr_max = max(
+                (float(sc.maximumPotentialExtendedDynamicRangeColorComponentValue()) for sc in AppKit.NSScreen.screens()),
+                default=1.0
+            )
+            if edr_max <= 1.05:
+                logger.info("📺 Pantalla SDR detectada (EDR=%.2f). Ajustando transmisión a SDR 8-bit nativo para color fiel y menor latencia.", edr_max)
+                hdr = False
+        except Exception:
+            pass
+
     # Dimensiones de ventana según resolución seleccionada (360p a 4K 2160p)
     res_dimensions = {
         "2160p": (3840, 2160),
@@ -703,26 +765,38 @@ def run_drps5_stream(
     try:
         disp_info = pygame.display.Info()
         if disp_info.current_w > 0 and disp_info.current_h > 0 and not fullscreen:
-            max_win_w = int(disp_info.current_w * 0.92)
-            max_win_h = int(disp_info.current_h * 0.88)
+            max_win_w = int(disp_info.current_w * 0.90)
+            max_win_h = int(disp_info.current_h * 0.86)
             if target_w > max_win_w or target_h > max_win_h:
                 scale = min(max_win_w / float(target_w), max_win_h / float(target_h))
                 target_w = max(960, int(target_w * scale))
                 target_h = max(540, int(target_h * scale))
     except Exception:
         pass
+
+    # Usar siempre pygame.SCALED + Metal para que la GPU realice el escalado a Retina/2K/4K con cero copia CPU
     flags = pygame.RESIZABLE
-    if upscale_mode != "direct" and hasattr(pygame, "SCALED"):
+    use_gpu_scaled = hasattr(pygame, "SCALED")
+    if use_gpu_scaled:
         flags = pygame.RESIZABLE | pygame.SCALED
-        # En modo SCALED, la superficie lógica coincide con la fuente (1080p/720p) y la GPU escala a 2K/4K
         if resolution_str in ("2160p", "1440p", "1080p"):
             mode_size = (1920, 1080)
         elif resolution_str == "720p":
             mode_size = (1280, 720)
         else:
-            mode_size = (target_w, target_h)
+            mode_size = res_dimensions.get(resolution_str, (1280, 720))
     else:
         mode_size = (target_w, target_h)
+
+    # Intensidad del filtro nativo Contrast Adaptive Sharpening (CAS) según el perfil elegido
+    if upscale_mode == "cas_high":
+        cas_strength = 210
+    elif upscale_mode == "cas_med":
+        cas_strength = 145
+    elif upscale_mode == "direct":
+        cas_strength = 0
+    else:
+        cas_strength = 145 if resolution_str in ("2160p", "1440p") else (85 if resolution_str == "1080p" else 0)
 
     # Establecer título de ventana antes y después de inicializar la pantalla
     pygame.display.set_caption(f"DRPS5 - Pantalla Remota {target_console_name}")
@@ -773,8 +847,17 @@ def run_drps5_stream(
 
     try:
         screen = pygame.display.set_mode(mode_size, flags)
+        if not fullscreen and use_gpu_scaled and (target_w != mode_size[0] or target_h != mode_size[1]):
+            try:
+                from pygame._sdl2 import video as _sdl2_vid
+                _win = _sdl2_vid.Window.from_display_module()
+                _win.size = (target_w, target_h)
+                _win.position = _sdl2_vid.WINDOWPOS_CENTERED
+            except Exception:
+                pass
     except pygame.error:
         flags = pygame.RESIZABLE
+        use_gpu_scaled = False
         mode_size = (target_w, target_h)
         screen = pygame.display.set_mode(mode_size, flags)
     pygame.display.set_caption(f"DRPS5 - Pantalla Remota {target_console_name}")
@@ -839,7 +922,7 @@ def run_drps5_stream(
     font = pygame.font.SysFont("Helvetica", 18, bold=True)
     small_font = pygame.font.SysFont("Helvetica", 14)
 
-    receiver = DRPS5Receiver(audio_enabled=audio_enabled)
+    receiver = DRPS5Receiver(audio_enabled=audio_enabled, cas_strength=cas_strength)
 
     # Construir mapa de hosts resiliente para UserProfile
     clean_mac = (mac_address or "AA:BB:CC:DD:EE:FF").strip()
@@ -872,7 +955,8 @@ def run_drps5_stream(
         resolution=res_parsed,
         fps=fps_parsed,
         codec=codec_str,
-        hdr=hdr
+        hdr=hdr,
+        bitrate_kbps=int(bitrate_kbps or 0),
     )
 
     controller = Controller()
@@ -963,39 +1047,72 @@ def run_drps5_stream(
                 logger.warning(f"Error emitiendo pulso Touchpad: {e}")
         threading.Thread(target=_pulse, daemon=True).start()
 
-    # Cargar mapeo de botones de mando personalizado o por defecto
+    # Cargar mapeo de botones y preferencias de jugabilidad
+    cfg_circle_confirm = False
     try:
         from drps5_config import DRPS5Config
+        full_cfg = DRPS5Config.load()
+        cfg_circle_confirm = bool(full_cfg.get("circle_confirm", False))
         gp_map = DRPS5Config.get_gamepad_mapping()
         cfg_ps_btn = int(gp_map.get("ps_button", 5))
         cfg_touch_btn = int(gp_map.get("touchpad_button", 20))
         cfg_opt_btn = int(gp_map.get("options_button", 6))
         cfg_share_btn = int(gp_map.get("share_button", 4))
-        cfg_deadzone = float(gp_map.get("stick_deadzone", 0.12))
-        logger.info(f"Mapeo de mando activo: PS={cfg_ps_btn}, Touchpad={cfg_touch_btn}, Options={cfg_opt_btn}, Share={cfg_share_btn}, Deadzone={cfg_deadzone}")
+        cfg_deadzone = float(gp_map.get("stick_deadzone", 0.10))
+        logger.info(f"Mapeo de mando activo: PS={cfg_ps_btn}, Touchpad={cfg_touch_btn}, Options={cfg_opt_btn}, Share={cfg_share_btn}, Deadzone={cfg_deadzone}, CircleConfirm={cfg_circle_confirm}")
     except Exception as e:
         logger.debug(f"Error cargando mapeo de mando: {e}")
         cfg_ps_btn = 5
         cfg_touch_btn = 20
         cfg_opt_btn = 6
         cfg_share_btn = 4
-        cfg_deadzone = 0.12
+        cfg_deadzone = 0.10
 
-    # Estado de sticks y filtros anti-saturación UDP con respuesta de ultra-baja latencia
+    def remap_confirm_button(btn_name: Optional[str]) -> Optional[str]:
+        if cfg_circle_confirm:
+            if btn_name == "CROSS":
+                return "CIRCLE"
+            if btn_name == "CIRCLE":
+                return "CROSS"
+        return btn_name
+
+    # Estado de sticks con zona muerta radial 2D real y envío asíncrono a 125Hz sin bloquear el bucle de renderizado
+    raw_stick_left = [0.0, 0.0]
+    raw_stick_right = [0.0, 0.0]
     stick_left = [0.0, 0.0]
     stick_right = [0.0, 0.0]
-    stick_deadzone = cfg_deadzone
-    stick_min_delta = 0.008
+    stick_deadzone = max(0.03, min(0.35, cfg_deadzone))
+    stick_min_delta = 0.005
     trigger_l2_pressed = False
     trigger_r2_pressed = False
 
+    def apply_radial_stick(rx: float, ry: float, deadzone: float = stick_deadzone) -> tuple[float, float]:
+        """Zona muerta radial 2D genuina con curva suave de precisión (sin encaje axial en X/Y)."""
+        mag = math.hypot(rx, ry)
+        if mag <= deadzone:
+            return 0.0, 0.0
+        clamped = min(1.0, mag)
+        norm = (clamped - deadzone) / (1.0 - deadzone)
+        # Curva híbrida 85% lineal + 15% cúbica para micro-apuntado preciso sin perder velocidad máxima
+        curved = norm * (0.85 + 0.15 * norm * norm)
+        scale = curved / mag
+        return max(-1.0, min(1.0, rx * scale)), max(-1.0, min(1.0, ry * scale))
+
     def apply_stick_filter(raw_val: float, deadzone: float = stick_deadzone) -> float:
-        """Aplica zona muerta radial escalada para eliminar drift analógico sin saltos bruscos."""
         if abs(raw_val) <= deadzone:
             return 0.0
         sign = 1.0 if raw_val > 0 else -1.0
         scaled = sign * ((abs(raw_val) - deadzone) / (1.0 - deadzone))
         return max(-1.0, min(1.0, scaled))
+
+    def push_stick_2d(side: str, raw_vec: list, out_vec: list):
+        fx, fy = apply_radial_stick(raw_vec[0], raw_vec[1], stick_deadzone)
+        centered_now = (fx == 0.0 and fy == 0.0 and (out_vec[0] != 0.0 or out_vec[1] != 0.0))
+        if centered_now or abs(fx - out_vec[0]) >= stick_min_delta or abs(fy - out_vec[1]) >= stick_min_delta:
+            out_vec[0], out_vec[1] = fx, fy
+            controller.stick(side, point=(fx, fy))
+            if centered_now:
+                controller.update_sticks()
 
     last_stick_watchdog = 0.0
     last_hotplug_check = 0.0
@@ -1123,7 +1240,7 @@ def run_drps5_stream(
                         elif event.button == cfg_share_btn or btn_name == "SHARE":
                             target_name = "SHARE"
                         elif btn_name:
-                            target_name = btn_name
+                            target_name = remap_confirm_button(btn_name)
 
                         if target_name:
                             pressed_physical_buttons[event.button] = target_name
@@ -1151,7 +1268,7 @@ def run_drps5_stream(
                         elif event.button == cfg_share_btn or btn_name == "SHARE":
                             target_name = "SHARE"
                         elif btn_name:
-                            target_name = btn_name
+                            target_name = remap_confirm_button(btn_name)
 
                         if target_name:
                             pressed_physical_buttons.pop(event.button, None)
@@ -1159,41 +1276,41 @@ def run_drps5_stream(
                                 pressed_buttons.discard(target_name)
                                 controller.button(target_name, action="release")
 
-                    # Ejes analógicos y gatillos de GameController (-32768 a 32767) con zona muerta radial escalada
+                    # Superficie táctil capacitiva real del mando DualSense / DualShock 4 (gestos swipe multi-touch)
+                    elif event.type in (
+                        getattr(pygame, "CONTROLLERTOUCHPADDOWN", -1),
+                        getattr(pygame, "CONTROLLERTOUCHPADMOTION", -2),
+                        getattr(pygame, "CONTROLLERTOUCHPADUP", -3),
+                    ):
+                        is_down = event.type != getattr(pygame, "CONTROLLERTOUCHPADUP", -3)
+                        finger = int(getattr(event, "finger", 0)) & 0x01
+                        tx = int(max(0.0, min(1.0, float(getattr(event, "x", 0.5)))) * 1919)
+                        ty = int(max(0.0, min(1.0, float(getattr(event, "y", 0.5)))) * 941)
+                        controller.touchpad(is_down, pointer_id=finger, x=tx, y=ty, repeats=(1 if event.type == getattr(pygame, "CONTROLLERTOUCHPADMOTION", -2) else 2))
+
+                    # Ejes analógicos y gatillos de GameController (-32768 a 32767) con zona muerta radial 2D real
                     elif event.type == pygame.CONTROLLERAXISMOTION:
                         val = max(-1.0, min(1.0, event.value / 32767.0))
                         axis = event.axis
                         if axis == pygame.CONTROLLER_AXIS_LEFTX:
-                            filtered = apply_stick_filter(val, stick_deadzone)
-                            if abs(filtered - stick_left[0]) >= stick_min_delta or (filtered == 0.0 and stick_left[0] != 0.0):
-                                stick_left[0] = filtered
-                                controller.stick("left", point=tuple(stick_left))
-                                controller.update_sticks()
+                            raw_stick_left[0] = val
+                            push_stick_2d("left", raw_stick_left, stick_left)
                         elif axis == pygame.CONTROLLER_AXIS_LEFTY:
-                            filtered = apply_stick_filter(val, stick_deadzone)
-                            if abs(filtered - stick_left[1]) >= stick_min_delta or (filtered == 0.0 and stick_left[1] != 0.0):
-                                stick_left[1] = filtered
-                                controller.stick("left", point=tuple(stick_left))
-                                controller.update_sticks()
+                            raw_stick_left[1] = val
+                            push_stick_2d("left", raw_stick_left, stick_left)
                         elif axis == pygame.CONTROLLER_AXIS_RIGHTX:
-                            filtered = apply_stick_filter(val, stick_deadzone)
-                            if abs(filtered - stick_right[0]) >= stick_min_delta or (filtered == 0.0 and stick_right[0] != 0.0):
-                                stick_right[0] = filtered
-                                controller.stick("right", point=tuple(stick_right))
-                                controller.update_sticks()
+                            raw_stick_right[0] = val
+                            push_stick_2d("right", raw_stick_right, stick_right)
                         elif axis == pygame.CONTROLLER_AXIS_RIGHTY:
-                            filtered = apply_stick_filter(val, stick_deadzone)
-                            if abs(filtered - stick_right[1]) >= stick_min_delta or (filtered == 0.0 and stick_right[1] != 0.0):
-                                stick_right[1] = filtered
-                                controller.stick("right", point=tuple(stick_right))
-                                controller.update_sticks()
+                            raw_stick_right[1] = val
+                            push_stick_2d("right", raw_stick_right, stick_right)
                         elif axis == pygame.CONTROLLER_AXIS_TRIGGERLEFT:
-                            is_down = (event.value > 8000)
+                            is_down = (event.value > 8000) if not trigger_l2_pressed else (event.value > 4500)
                             if is_down != trigger_l2_pressed:
                                 trigger_l2_pressed = is_down
                                 controller.button("L2", action="press" if is_down else "release")
                         elif axis == pygame.CONTROLLER_AXIS_TRIGGERRIGHT:
-                            is_down = (event.value > 8000)
+                            is_down = (event.value > 8000) if not trigger_r2_pressed else (event.value > 4500)
                             if is_down != trigger_r2_pressed:
                                 trigger_r2_pressed = is_down
                                 controller.button("R2", action="press" if is_down else "release")
@@ -1212,7 +1329,7 @@ def run_drps5_stream(
                             logger.info(f"📱 Pulsación Joystick para Touchpad (botón {event.button}). Manteniendo presionado...")
                             target_name = "TOUCHPAD"
                         elif btn_name:
-                            target_name = btn_name
+                            target_name = remap_confirm_button(btn_name)
 
                         if target_name:
                             pressed_physical_buttons[event.button] = target_name
@@ -1238,7 +1355,7 @@ def run_drps5_stream(
                             logger.info(f"📱 Liberación Joystick para Touchpad (botón {event.button}). Liberando...")
                             target_name = "TOUCHPAD"
                         elif btn_name:
-                            target_name = btn_name
+                            target_name = remap_confirm_button(btn_name)
 
                         if target_name:
                             pressed_physical_buttons.pop(event.button, None)
@@ -1250,31 +1367,19 @@ def run_drps5_stream(
                         if not active_controllers:
                             val = max(-1.0, min(1.0, float(event.value)))
                             if event.axis == 0:
-                                filtered = apply_stick_filter(val, stick_deadzone)
-                                if abs(filtered - stick_left[0]) >= stick_min_delta or (filtered == 0.0 and stick_left[0] != 0.0):
-                                    stick_left[0] = filtered
-                                    controller.stick("left", point=tuple(stick_left))
-                                    controller.update_sticks()
+                                raw_stick_left[0] = val
+                                push_stick_2d("left", raw_stick_left, stick_left)
                             elif event.axis == 1:
-                                filtered = apply_stick_filter(val, stick_deadzone)
-                                if abs(filtered - stick_left[1]) >= stick_min_delta or (filtered == 0.0 and stick_left[1] != 0.0):
-                                    stick_left[1] = filtered
-                                    controller.stick("left", point=tuple(stick_left))
-                                    controller.update_sticks()
+                                raw_stick_left[1] = val
+                                push_stick_2d("left", raw_stick_left, stick_left)
                             elif event.axis == 2:
-                                filtered = apply_stick_filter(val, stick_deadzone)
-                                if abs(filtered - stick_right[0]) >= stick_min_delta or (filtered == 0.0 and stick_right[0] != 0.0):
-                                    stick_right[0] = filtered
-                                    controller.stick("right", point=tuple(stick_right))
-                                    controller.update_sticks()
+                                raw_stick_right[0] = val
+                                push_stick_2d("right", raw_stick_right, stick_right)
                             elif event.axis == 3:
-                                filtered = apply_stick_filter(val, stick_deadzone)
-                                if abs(filtered - stick_right[1]) >= stick_min_delta or (filtered == 0.0 and stick_right[1] != 0.0):
-                                    stick_right[1] = filtered
-                                    controller.stick("right", point=tuple(stick_right))
-                                    controller.update_sticks()
+                                raw_stick_right[1] = val
+                                push_stick_2d("right", raw_stick_right, stick_right)
                             elif event.axis in (4, 5):
-                                is_down = (val > 0.3)
+                                is_down = (val > 0.30) if not (trigger_l2_pressed if event.axis == 4 else trigger_r2_pressed) else (val > 0.15)
                                 if event.axis == 4 and is_down != trigger_l2_pressed:
                                     trigger_l2_pressed = is_down
                                     controller.button("L2", action="press" if is_down else "release")
@@ -1446,10 +1551,10 @@ def run_drps5_stream(
             elif mouse_delta > 0:
                 last_mouse_pos = curr_mouse_pos
 
-            # Renderizar en pantalla
+            # Renderizar en pantalla (escalado 100% en GPU Metal con cero copias CPU cuando SCALED está activo)
             screen_w, screen_h = screen.get_size()
             if screen_w <= 10 or screen_h <= 10:
-                clock.tick(fps_val + 5)
+                clock.tick(125)
                 continue
 
             if current_frame is not None:
@@ -1457,6 +1562,20 @@ def run_drps5_stream(
                 if fw > 0 and fh > 0:
                     if fw == screen_w and fh == screen_h:
                         screen.blit(current_frame, (0, 0))
+                    elif use_gpu_scaled and not fullscreen:
+                        # Ajustar una sola vez la superficie lógica de Metal al tamaño nativo del stream entrante
+                        try:
+                            from pygame._sdl2 import video as _sdl2_vid
+                            _cur_win_sz = _sdl2_vid.Window.from_display_module().size
+                            mode_size = (fw, fh)
+                            screen = pygame.display.set_mode(mode_size, flags)
+                            _sdl2_vid.Window.from_display_module().size = _cur_win_sz
+                            configure_cocoa_window()
+                            screen_w, screen_h = screen.get_size()
+                            screen.blit(current_frame, (0, 0))
+                        except Exception:
+                            scaled_surf = pygame.transform.smoothscale(current_frame, (screen_w, screen_h))
+                            screen.blit(scaled_surf, (0, 0))
                     else:
                         scale = min(screen_w / fw, screen_h / fh)
                         scaled_w = max(1, int(fw * scale))
@@ -1464,13 +1583,10 @@ def run_drps5_stream(
                         if scaled_w == fw and scaled_h == fh:
                             scaled_surf = current_frame
                         else:
-                            scaled_surf = pygame.transform.scale(current_frame, (scaled_w, scaled_h))
-
+                            scaled_surf = pygame.transform.smoothscale(current_frame, (scaled_w, scaled_h))
                         if scaled_w < screen_w or scaled_h < screen_h:
-                            screen.fill((10, 14, 23))  # Fondo oscuro solo si hay franjas
-                        pos_x = (screen_w - scaled_w) // 2
-                        pos_y = (screen_h - scaled_h) // 2
-                        screen.blit(scaled_surf, (pos_x, pos_y))
+                            screen.fill((10, 14, 23))
+                        screen.blit(scaled_surf, ((screen_w - scaled_w) // 2, (screen_h - scaled_h) // 2))
             else:
                 # Pantalla de espera o error de conexión
                 screen.fill((15, 23, 42))
@@ -1478,14 +1594,11 @@ def run_drps5_stream(
                 if err:
                     err_txt = font.render("Aviso de Conexión PS5:", True, (239, 68, 68))
                     screen.blit(err_txt, (screen_w // 2 - err_txt.get_width() // 2, screen_h // 2 - 40))
-                    
                     err_msg_str = str(err).strip()
-                    if not err_msg_str or err_msg_str == "''" or err_msg_str == '""':
+                    if not err_msg_str or err_msg_str in ("''", '""'):
                         err_msg_str = "No se pudo establecer la sesión con la PS5. Verifica que la consola esté encendida y el PIN sea válido."
-
                     reason_txt = small_font.render(err_msg_str, True, (254, 202, 202))
                     screen.blit(reason_txt, (screen_w // 2 - reason_txt.get_width() // 2, screen_h // 2 - 10))
-
                     hint_txt = small_font.render("[Presiona Shift+Esc para volver al menú de DRPS5]", True, (148, 163, 184))
                     screen.blit(hint_txt, (screen_w // 2 - hint_txt.get_width() // 2, screen_h // 2 + 30))
                 else:
@@ -1495,41 +1608,36 @@ def run_drps5_stream(
                     hint_txt = small_font.render("[Presiona Esc o cierra la ventana para cancelar]", True, (148, 163, 184))
                     screen.blit(hint_txt, (screen_w // 2 - hint_txt.get_width() // 2, screen_h // 2 + 15))
 
-            # HUD informativo en esquina superior
+            # HUD informativo cacheado (sólo se re-dibuja cuando cambia FPS/Mando/Audio/Estado, 0 allocs por frame)
             if show_hud:
-                hud_bg = pygame.Surface((380, 92), pygame.SRCALPHA)
-                hud_bg.fill((15, 23, 42, 195))
-                screen.blit(hud_bg, (10, 10))
+                audio_dev_name = getattr(receiver, "_current_audio_device_name", "Predeterminado")[:34]
+                hud_key = (receiver.fps_displayed, connected_controller_name, audio_dev_name, bool(session_state.get("error")), resolution_str, hdr, cas_strength)
+                if getattr(receiver, "_hud_cache_key", None) != hud_key or getattr(receiver, "_hud_cache_surf", None) is None:
+                    hud_surf = pygame.Surface((400, 92), pygame.SRCALPHA)
+                    hud_surf.fill((15, 23, 42, 195))
+                    hdr_badge = " | HDR" if hdr else (" | CAS" if cas_strength > 0 else "")
+                    res_labels = {
+                        "2160p": "4K GPU (2160P)",
+                        "1440p": "2K GPU (1440P)",
+                        "1080p": "1080P FULL HD",
+                        "720p": "720P HD",
+                        "540p": "540P",
+                        "360p": "360P",
+                    }
+                    res_label_hud = res_labels.get(resolution_str, resolution_str.upper())
+                    hud_status = "ERROR DE CONEXIÓN" if session_state.get("error") else f"{receiver.fps_displayed} FPS | {res_label_hud}{hdr_badge}"
+                    fps_text = font.render(f"DRPS5 | {hud_status}", True, (56, 189, 248) if not session_state.get("error") else (239, 68, 68))
+                    hud_surf.blit(fps_text, (10, 4))
+                    is_gamepad = (connected_controller_name != "Teclado Activo")
+                    ctrl_color = (52, 211, 153) if is_gamepad else (148, 163, 184)
+                    hud_surf.blit(small_font.render(f"🎮 {connected_controller_name}", True, ctrl_color), (10, 24))
+                    hud_surf.blit(small_font.render(f"🔊 {audio_dev_name}", True, (148, 163, 184)), (10, 42))
+                    hud_surf.blit(small_font.render("F11: Pantalla completa | F1: HUD | Shift+Esc: Salir", True, (203, 213, 225)), (10, 60))
+                    receiver._hud_cache_key = hud_key
+                    receiver._hud_cache_surf = hud_surf
+                screen.blit(receiver._hud_cache_surf, (10, 10))
 
-                hdr_badge = " | HDR" if hdr else ""
-                res_labels = {
-                    "2160p": "4K ULTRA HD (3840x2160)",
-                    "1440p": "2K QHD (2560x1440)",
-                    "1080p": "1080P FULL HD",
-                    "720p": "720P HD",
-                    "540p": "540P",
-                    "360p": "360P",
-                }
-                res_label_hud = res_labels.get(resolution_str, resolution_str.upper())
-                hud_status = f"{receiver.fps_displayed} FPS | {res_label_hud}{hdr_badge}"
-                if session_state.get("error"):
-                    hud_status = "ERROR DE CONEXIÓN"
-                fps_text = font.render(f"DRPS5 | {hud_status}", True, (56, 189, 248) if not session_state.get("error") else (239, 68, 68))
-                screen.blit(fps_text, (20, 14))
-
-                is_gamepad = (connected_controller_name != "Teclado Activo")
-                ctrl_color = (52, 211, 153) if is_gamepad else (148, 163, 184)
-                ctrl_text = small_font.render(f"🎮 {connected_controller_name}", True, ctrl_color)
-                screen.blit(ctrl_text, (20, 34))
-
-                audio_dev_name = getattr(receiver, "_current_audio_device_name", "Predeterminado")
-                audio_text = small_font.render(f"🔊 {audio_dev_name[:34]}", True, (148, 163, 184))
-                screen.blit(audio_text, (20, 52))
-
-                help_text = small_font.render("F11: Pantalla completa | F1: HUD | Shift+Esc: Salir", True, (203, 213, 225))
-                screen.blit(help_text, (20, 70))
-
-            # Botón translúcido de Salir en esquina superior derecha (aparece por proximidad del ratón o con HUD)
+            # Botón translúcido de Salir cacheado en esquina superior derecha
             btn_w, btn_h = 96, 34
             btn_x = screen_w - btn_w - 16
             btn_y = 16
@@ -1539,20 +1647,22 @@ def run_drps5_stream(
             is_hover = btn_rect.collidepoint(curr_mouse_pos)
 
             if in_proximity or is_hover or show_hud:
-                btn_surface = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
-                if is_hover:
-                    pygame.draw.rect(btn_surface, (225, 29, 72, 225), (0, 0, btn_w, btn_h), border_radius=8)
-                    pygame.draw.rect(btn_surface, (255, 255, 255, 230), (0, 0, btn_w, btn_h), width=2, border_radius=8)
-                    btn_txt = small_font.render("✕ Salir", True, (255, 255, 255))
-                else:
-                    pygame.draw.rect(btn_surface, (15, 23, 42, 185), (0, 0, btn_w, btn_h), border_radius=8)
-                    pygame.draw.rect(btn_surface, (148, 163, 184, 160), (0, 0, btn_w, btn_h), width=1, border_radius=8)
-                    btn_txt = small_font.render("✕ Salir", True, (226, 232, 240))
+                if not hasattr(receiver, "_exit_btn_surfs"):
+                    s_norm = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+                    pygame.draw.rect(s_norm, (15, 23, 42, 185), (0, 0, btn_w, btn_h), border_radius=8)
+                    pygame.draw.rect(s_norm, (148, 163, 184, 160), (0, 0, btn_w, btn_h), width=1, border_radius=8)
+                    tn = small_font.render("✕ Salir", True, (226, 232, 240))
+                    s_norm.blit(tn, (btn_w // 2 - tn.get_width() // 2, btn_h // 2 - tn.get_height() // 2))
 
-                btn_surface.blit(btn_txt, (btn_w // 2 - btn_txt.get_width() // 2, btn_h // 2 - btn_txt.get_height() // 2))
-                screen.blit(btn_surface, (btn_x, btn_y))
+                    s_hov = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+                    pygame.draw.rect(s_hov, (225, 29, 72, 225), (0, 0, btn_w, btn_h), border_radius=8)
+                    pygame.draw.rect(s_hov, (255, 255, 255, 230), (0, 0, btn_w, btn_h), width=2, border_radius=8)
+                    th_t = small_font.render("✕ Salir", True, (255, 255, 255))
+                    s_hov.blit(th_t, (btn_w // 2 - th_t.get_width() // 2, btn_h // 2 - th_t.get_height() // 2))
+                    receiver._exit_btn_surfs = (s_norm, s_hov)
+                screen.blit(receiver._exit_btn_surfs[1 if is_hover else 0], (btn_x, btn_y))
 
-            # Toast visual de conexión/desconexión de mando (visible 3.5 segundos con estilo elegante)
+            # Toast visual de conexión/desconexión de mando
             if toast_msg and time.time() < toast_expire_time:
                 tw, th = 380, 36
                 toast_surf = pygame.Surface((tw, th), pygame.SRCALPHA)
@@ -1569,7 +1679,7 @@ def run_drps5_stream(
                 pygame.mouse.set_visible(False)
                 mouse_visible = False
 
-            # Watchdog de reconexión periódica de mandos si no hay ninguno activo (hotplug background polling cada 0.5s)
+            # Watchdog de reconexión periódica de mandos si no hay ninguno activo
             now_time = time.time()
             if not active_controllers and not active_joysticks and (now_time - last_hotplug_check > 0.5):
                 last_hotplug_check = now_time
@@ -1577,68 +1687,48 @@ def run_drps5_stream(
                 if pygame.joystick.get_count() > 0 or sdl2_controller.get_count() > 0:
                     refresh_all_controllers(force=True)
 
-            # Watchdog de sticks y botones para reconciliar posición física y evitar botones pegados o drift
+            # Watchdog de sticks (radial 2D) y botones cada 50ms para evitar botones pegados o drift
             if (now_time - last_stick_watchdog > 0.050) and active_controllers:
                 last_stick_watchdog = now_time
                 try:
                     c_first = next(iter(active_controllers.values()))
                     if c_first and c_first.attached():
-                        # 1. Reconciliador de seguridad para botones / D-Pad: asegurar que ningún botón quede
-                        # registrado como presionado si físicamente ya fue soltado en el mando
                         for b_code in list(pressed_physical_buttons.keys()):
                             try:
                                 if hasattr(c_first, "get_button") and not c_first.get_button(b_code):
                                     b_name = pressed_physical_buttons.pop(b_code, None)
                                     if b_name and b_name not in pressed_physical_buttons.values():
-                                        logger.info(f"⚡ Reconciliador de seguridad: {b_name} (botón físico {b_code}) liberado. Sincronizando con PS5...")
+                                        logger.info(f"⚡ Reconciliador de seguridad: {b_name} (botón físico {b_code}) liberado.")
                                         pressed_buttons.discard(b_name)
                                         controller.button(b_name, action="release")
                             except Exception:
                                 pass
 
-                        # 2. Reconciliación independiente de cada eje de stick analógico
-                        cur_lx = apply_stick_filter(c_first.get_axis(pygame.CONTROLLER_AXIS_LEFTX) / 32767.0, stick_deadzone)
-                        cur_ly = apply_stick_filter(c_first.get_axis(pygame.CONTROLLER_AXIS_LEFTY) / 32767.0, stick_deadzone)
-                        cur_rx = apply_stick_filter(c_first.get_axis(pygame.CONTROLLER_AXIS_RIGHTX) / 32767.0, stick_deadzone)
-                        cur_ry = apply_stick_filter(c_first.get_axis(pygame.CONTROLLER_AXIS_RIGHTY) / 32767.0, stick_deadzone)
+                        raw_stick_left[0] = c_first.get_axis(pygame.CONTROLLER_AXIS_LEFTX) / 32767.0
+                        raw_stick_left[1] = c_first.get_axis(pygame.CONTROLLER_AXIS_LEFTY) / 32767.0
+                        raw_stick_right[0] = c_first.get_axis(pygame.CONTROLLER_AXIS_RIGHTX) / 32767.0
+                        raw_stick_right[1] = c_first.get_axis(pygame.CONTROLLER_AXIS_RIGHTY) / 32767.0
 
-                        # En reposo/centro (0, 0), forzar neutralización garantizada de inmediato
+                        cur_lx, cur_ly = apply_radial_stick(raw_stick_left[0], raw_stick_left[1], stick_deadzone)
+                        cur_rx, cur_ry = apply_radial_stick(raw_stick_right[0], raw_stick_right[1], stick_deadzone)
+
                         if cur_lx == 0.0 and cur_ly == 0.0:
                             if stick_left[0] != 0.0 or stick_left[1] != 0.0:
-                                stick_left[0] = 0.0
-                                stick_left[1] = 0.0
+                                stick_left[0] = stick_left[1] = 0.0
                                 controller.stick("left", point=(0.0, 0.0))
                                 controller.update_sticks()
-                        else:
-                            changed_l = False
-                            if abs(cur_lx - stick_left[0]) > 0.02:
-                                stick_left[0] = cur_lx
-                                changed_l = True
-                            if abs(cur_ly - stick_left[1]) > 0.02:
-                                stick_left[1] = cur_ly
-                                changed_l = True
-                            if changed_l:
-                                controller.stick("left", point=tuple(stick_left))
-                                controller.update_sticks()
+                        elif abs(cur_lx - stick_left[0]) > 0.02 or abs(cur_ly - stick_left[1]) > 0.02:
+                            stick_left[0], stick_left[1] = cur_lx, cur_ly
+                            controller.stick("left", point=(cur_lx, cur_ly))
 
-                        # En reposo/centro (0, 0), forzar neutralización garantizada de inmediato
                         if cur_rx == 0.0 and cur_ry == 0.0:
                             if stick_right[0] != 0.0 or stick_right[1] != 0.0:
-                                stick_right[0] = 0.0
-                                stick_right[1] = 0.0
+                                stick_right[0] = stick_right[1] = 0.0
                                 controller.stick("right", point=(0.0, 0.0))
                                 controller.update_sticks()
-                        else:
-                            changed_r = False
-                            if abs(cur_rx - stick_right[0]) > 0.02:
-                                stick_right[0] = cur_rx
-                                changed_r = True
-                            if abs(cur_ry - stick_right[1]) > 0.02:
-                                stick_right[1] = cur_ry
-                                changed_r = True
-                            if changed_r:
-                                controller.stick("right", point=tuple(stick_right))
-                                controller.update_sticks()
+                        elif abs(cur_rx - stick_right[0]) > 0.02 or abs(cur_ry - stick_right[1]) > 0.02:
+                            stick_right[0], stick_right[1] = cur_rx, cur_ry
+                            controller.stick("right", point=(cur_rx, cur_ry))
                 except Exception:
                     pass
 
@@ -1654,11 +1744,12 @@ def run_drps5_stream(
                 try:
                     screen = pygame.display.get_surface()
                     if screen is None or screen.get_width() <= 10 or screen.get_height() <= 10:
-                        screen = pygame.display.set_mode((target_w, target_h), flags)
+                        screen = pygame.display.set_mode(mode_size, flags)
                         configure_cocoa_window()
                 except Exception:
                     pass
-            clock.tick(fps_val + 5)
+            # Ritmo de 125Hz sin colisionar con el VSync nativo de CAMetalLayer (60Hz / 120Hz ProMotion)
+            clock.tick(125)
 
     except Exception as loop_err:
         logger.error(f"Error inesperado en bucle de streaming: {loop_err}", exc_info=True)

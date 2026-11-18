@@ -293,8 +293,10 @@ class Session:
         quality: Union[Quality, str, int] = "default",
         codec: str = "h264",
         hdr: bool = False,
+        bitrate_kbps: int = 0,
     ):
         self.error = ""
+        self.bitrate_kbps = int(bitrate_kbps or 0)
         self.disconnect_reason = ""
         self._host = host
         self._profile = profile
@@ -812,13 +814,17 @@ class Session:
             if self.type == TYPE_PS5:
                 host_str = str(self._host or "")
                 is_remote_or_vpn = host_str.startswith("100.") or not (
-                    host_str.startswith("192.168.") or host_str.startswith("10.") or host_str.startswith("172.16.") or host_str.startswith("127.")
+                    host_str.startswith("192.168.") or host_str.startswith("10.") or host_str.startswith("172.") or host_str.startswith("127.")
                 )
                 mtu = 1200 if is_remote_or_vpn else DEFAULT_MTU
-                if is_remote_or_vpn and self._quality in [Quality.DEFAULT, Quality.HIGH]:
-                    self._quality = Quality.MEDIUM
-                _LOGGER.info("Iniciando transmisión PS5 directa (MTU=%s, Calidad=%s)...", mtu, self._quality)
-                self._start_stream(test=False, mtu=mtu, rtt=100)
+                rtt_ms = 25 if is_remote_or_vpn else 2
+                if is_remote_or_vpn and not self.bitrate_kbps and self._quality == Quality.DEFAULT:
+                    if self._resolution in (Resolution.RESOLUTION_1080P, Resolution.RESOLUTION_1440P, Resolution.RESOLUTION_2160P):
+                        self.bitrate_kbps = 12000
+                    else:
+                        self.bitrate_kbps = 6000
+                _LOGGER.info("Iniciando transmisión PS5 directa (MTU=%s, RTT=%sms, Calidad=%s, Bitrate=%s)...", mtu, rtt_ms, self._quality, self.bitrate_kbps or "AUTO")
+                self._start_stream(test=False, mtu=mtu, rtt=rtt_ms)
             else:
                 self._start_stream()
         return True

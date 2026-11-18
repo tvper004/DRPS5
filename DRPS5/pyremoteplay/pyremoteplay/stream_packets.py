@@ -87,11 +87,14 @@ def get_launch_spec(
     hdr: bool,
     rtt: int,
     mtu_in: int,
+    bitrate_kbps: int = 0,
 ) -> bytes:
     """Return launch spec."""
     resolution = Resolution.preset(resolution)
-    if quality == Quality.DEFAULT:
-        bitrate = resolution["bitrate"]
+    if bitrate_kbps and int(bitrate_kbps) > 0:
+        bitrate = max(2000, min(25000, int(bitrate_kbps)))
+    elif quality == Quality.DEFAULT:
+        bitrate = min(20000, resolution["bitrate"])
     else:
         bitrate = Quality.preset(quality)
     fps = FPS.preset(fps)

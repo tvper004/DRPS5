@@ -7,11 +7,15 @@ let state = {
   activeTab: "consoles",
   activeCat: 0,
   editingId: null,
-  streamActive: false
+  streamActive: false,
+  _initialized: false,
+  _initRetries: 0
 };
 
 function api() {
-  return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
+  return (window.pywebview && window.pywebview.api && typeof window.pywebview.api.get_initial_data === "function")
+    ? window.pywebview.api
+    : null;
 }
 
 function showToast(msg, ms = 2600) {
@@ -30,13 +34,21 @@ function updateClock() {
 }
 
 async function initApp() {
+  if (state._initialized) return;
   updateClock();
-  setInterval(updateClock, 15000);
 
   if (!api()) {
-    setTimeout(initApp, 100);
+    state._initRetries = (state._initRetries || 0) + 1;
+    if (state._initRetries < 50) {
+      setTimeout(initApp, 80);
+      return;
+    }
+    document.getElementById("splash").classList.add("hidden");
     return;
   }
+
+  state._initialized = true;
+  setInterval(updateClock, 15000);
 
   try {
     const data = await api().get_initial_data();
@@ -60,20 +72,37 @@ async function initApp() {
     renderConsoles();
     renderSettings();
     refreshPadBadge();
-    setInterval(refreshPadBadge, 5000);
+    setInterval(refreshPadBadge, 3000);
+    startLauncherGamepadPoll();
   } catch (e) {
+    state._initialized = false;
     console.error("Init error:", e);
+    if ((state._initRetries || 0) < 30) {
+      state._initRetries++;
+      setTimeout(initApp, 150);
+      return;
+    }
   } finally {
-    setTimeout(() => document.getElementById("splash").classList.add("hidden"), 450);
+    if (state._initialized || (state._initRetries || 0) >= 30) {
+      setTimeout(() => document.getElementById("splash").classList.add("hidden"), 250);
+    }
   }
 }
 
 async function refreshPadBadge() {
+  const el = document.getElementById("pad-badge");
+  try {
+    const gps = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+    if (gps.length > 0 && gps[0].connected) {
+      const cleanName = String(gps[0].id || "Mando").replace(/\s*\(.*?\)\s*/g, "").trim();
+      el.textContent = `Mando: ${cleanName || "Conectado"}`;
+      return;
+    }
+  } catch (_) {}
   if (!api() || !api().check_connected_controllers) return;
   try {
     const res = await api().check_connected_controllers();
     const list = res.controllers || [];
-    const el = document.getElementById("pad-badge");
     el.textContent = list.length > 0 ? `Mando: ${list[0].name || "Conectado"}` : "Teclado / Mando";
   } catch (_) {}
 }
@@ -355,19 +384,21 @@ function renderSettings() {
     });
     list.appendChild(box);
     api().get_logs("launcher", 200).then(r => {
-      box.textContent = (r && r.lines) ? r.lines.join("\n") : (r && r.content ? r.content : "");
+      box.textContent = (r && r.logs) ? r.logs : ((r && r.lines) ? r.lines.join("\n") : (r && r.content ? r.content : ""));
       box.scrollTop = box.scrollHeight;
     });
   } else {
-    addSettingRow(list, "DRPS5 Versión", "Interfaz WebOS V2 Nativa para Escritorio", `2.0.0 (${state.sysInfo.edition})`, null);
+    addSettingRow(list, "DRPS5 Versión", "Interfaz WebOS V2 Nativa para Escritorio", `2.0.17 (${state.sysInfo.edition})`, null);
     addSettingRow(list, "Arquitectura CPU", "Detección nativa Apple Silicon / Intel / x64 / ARM64", state.sysInfo.arch, null);
-    addSettingRow(list, "Aceleración Gráfica", "Renderizador GPU para 2K/4K @ 60FPS", `${state.sysInfo.gpu} (${state.sysInfo.hwaccel})`, null);
+    addSettingRow(list, "Aceleración Gráfica", "Renderizador GPU Metal CAS para 2K/4K @ 60FPS", `${state.sysInfo.gpu} (${state.sysInfo.hwaccel})`, null);
   }
 }
 
 function addSettingRow(parent, title, desc, val, onClick) {
+  const idx = parent.children.length;
   const row = document.createElement("button");
   row.className = "setting-row" + (onClick ? " interactive" : "");
+  row.dataset.rowIdx = String(idx);
   row.innerHTML = `
     <div>
       <div class="s-title">${escapeHtml(title)}</div>
@@ -375,7 +406,12 @@ function addSettingRow(parent, title, desc, val, onClick) {
     </div>
     <div class="s-val">${escapeHtml(val)}</div>
   `;
-  if (onClick) row.onclick = onClick;
+  if (onClick) {
+    row.onclick = () => {
+      state._lastSettingIdx = idx;
+      onClick();
+    };
+  }
   parent.appendChild(row);
 }
 
@@ -385,6 +421,10 @@ async function persistSettings() {
   }
   renderSettings();
   renderHero();
+  if (typeof state._lastSettingIdx === "number") {
+    const rows = document.querySelectorAll("#settings-list .setting-row");
+    if (rows[state._lastSettingIdx]) rows[state._lastSettingIdx].focus();
+  }
 }
 
 /* Console Modal */
@@ -466,4 +506,82 @@ function escapeHtml(s) {
   return String(s || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
 }
 
+function getNavButtons() {
+  const modal = document.getElementById("modal-console");
+  if (modal && modal.classList.contains("open")) {
+    return Array.from(modal.querySelectorAll("input, button")).filter(el => el.offsetParent !== null);
+  }
+  const panel = state.activeTab === "settings"
+    ? document.getElementById("panel-settings")
+    : document.getElementById("panel-consoles");
+  const topTabs = Array.from(document.querySelectorAll(".topbar .tab-btn"));
+  const bodyBtns = panel ? Array.from(panel.querySelectorAll("button")).filter(el => el.offsetParent !== null) : [];
+  return [...topTabs, ...bodyBtns];
+}
+
+function moveLauncherFocus(delta) {
+  const btns = getNavButtons();
+  if (!btns.length) return;
+  const idx = btns.indexOf(document.activeElement);
+  const next = idx < 0 ? (btns[2] || btns[0]) : btns[(idx + delta + btns.length) % btns.length];
+  if (next) next.focus();
+}
+
+function startLauncherGamepadPoll() {
+  if (state._gpPollStarted) return;
+  state._gpPollStarted = true;
+
+  window.addEventListener("gamepadconnected", () => refreshPadBadge());
+  window.addEventListener("gamepaddisconnected", () => refreshPadBadge());
+
+  window.addEventListener("keydown", (e) => {
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (tag === "INPUT") {
+      if (e.key === "Escape") closeConsoleModal();
+      return;
+    }
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); moveLauncherFocus(1); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); moveLauncherFocus(-1); }
+    else if (e.key === "Escape") { closeConsoleModal(); }
+  });
+
+  let lastNav = 0;
+  let prevBtns = {};
+  function tick() {
+    try {
+      const gps = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+      if (gps.length > 0) {
+        const gp = gps[0];
+        const now = performance.now();
+        const b = (i) => !!(gp.buttons[i] && gp.buttons[i].pressed);
+        const edge = (i) => { const cur = b(i); const was = !!prevBtns[i]; prevBtns[i] = cur; return cur && !was; };
+
+        const axX = (gp.axes && gp.axes[0]) || 0;
+        const axY = (gp.axes && gp.axes[1]) || 0;
+        if (now - lastNav > 185) {
+          if (b(13) || b(15) || axY > 0.55 || axX > 0.55) { moveLauncherFocus(1); lastNav = now; }
+          else if (b(12) || b(14) || axY < -0.55 || axX < -0.55) { moveLauncherFocus(-1); lastNav = now; }
+        }
+        if (edge(4)) switchTab("consoles"); // L1
+        if (edge(5)) switchTab("settings"); // R1
+        if (edge(3) && state.activeTab === "consoles") scanConsoles(); // Triangle
+        const confirmIdx = state.config.circle_confirm ? 1 : 0;
+        const backIdx = state.config.circle_confirm ? 0 : 1;
+        if (edge(confirmIdx)) {
+          if (document.activeElement && typeof document.activeElement.click === "function" && document.activeElement !== document.body) {
+            document.activeElement.click();
+          } else {
+            const p = state.profiles[state.selectedProfileId];
+            if (p && p.regist_key) connectConsole(p.id, state.config.connection_mode || "auto");
+          }
+        }
+        if (edge(backIdx)) closeConsoleModal();
+      }
+    } catch (_) {}
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+window.addEventListener("pywebviewready", initApp);
 window.addEventListener("DOMContentLoaded", initApp);

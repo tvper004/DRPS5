@@ -472,6 +472,7 @@ class RPStream:
             hdr=self._session.hdr,
             rtt=int(self.rtt),
             mtu_in=self.mtu,
+            bitrate_kbps=int(getattr(self._session, "bitrate_kbps", 0) or 0),
         )
         if format_type == "raw":
             return launch_spec

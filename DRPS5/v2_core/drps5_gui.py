@@ -83,17 +83,41 @@ try:
     log_dir = Path.home() / ".drps5"
     log_dir.mkdir(parents=True, exist_ok=True)
     purge_old_logs_files(30)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(log_dir / "launcher.log", encoding="utf-8"),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+    _root_log = logging.getLogger()
+    _root_log.setLevel(logging.INFO)
+    _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "").endswith("launcher.log") for h in _root_log.handlers):
+        _fh = logging.FileHandler(log_dir / "launcher.log", encoding="utf-8")
+        _fh.setFormatter(_fmt)
+        _root_log.addHandler(_fh)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in _root_log.handlers):
+        _sh = logging.StreamHandler(sys.stdout)
+        _sh.setFormatter(_fmt)
+        _root_log.addHandler(_sh)
 except Exception:
     logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("drps5_gui")
+
+# Evitar puertos privilegiados (<1024) en el servidor HTTP local de pywebview
+try:
+    import random as _rnd
+    import socket as _wvsock
+    import webview.http as _wvhttp
+
+    def _safe_random_port() -> int:
+        for _ in range(64):
+            port = _rnd.randint(18000, 60000)
+            with _wvsock.socket(_wvsock.AF_INET, _wvsock.SOCK_STREAM) as s:
+                try:
+                    s.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+        return 28955
+
+    _wvhttp._get_random_port = _safe_random_port
+except Exception:
+    pass
 
 class DRPS5Api:
     def __init__(self):
@@ -318,17 +342,18 @@ class DRPS5Api:
 
     def save_settings(self, settings):
         try:
+            cfg = DRPS5Config.load()
             for k, v in settings.items():
-                DRPS5Config.set(k, v)
-            # También actualizar en perfil activo si aplica
-            active_p = DRPS5Config.get_active_profile()
-            if active_p:
-                for k in ["resolution", "fps", "codec", "hdr"]:
+                if k not in ("profiles", "consoles"):
+                    cfg[k] = v
+            active_id = cfg.get("active_profile_id")
+            if active_id and active_id in cfg.get("profiles", {}):
+                active_p = cfg["profiles"][active_id]
+                for k in ("resolution", "fps", "codec", "hdr"):
                     if k in settings:
                         active_p[k] = settings[k]
-                DRPS5Config.save_profile(active_p)
-
-            self._config_data = DRPS5Config.load()
+            DRPS5Config.save(cfg)
+            self._config_data = cfg
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -351,31 +376,64 @@ class DRPS5Api:
             return {"success": False, "error": str(e)}
 
     def check_connected_controllers(self):
-        """Verifica en tiempo real mandos USB y Bluetooth conectados de manera segura y no bloqueante."""
+        """Verifica en tiempo real mandos USB y Bluetooth conectados (GameController + IOKit HID)."""
         if sys.platform == "darwin":
+            c_list = []
+            seen_names = set()
             try:
                 import objc
                 if "GCController" not in globals():
                     objc.loadBundle('GameController', globals(), bundle_path='/System/Library/Frameworks/GameController.framework')
-                controllers = GCController.controllers()
-                c_list = []
+                try:
+                    GCController.setShouldMonitorBackgroundEvents_(True)
+                except Exception:
+                    pass
+                controllers = GCController.controllers() or []
                 for i, c in enumerate(controllers):
-                    name = str(c.vendorName() or "Mando Compatible")
-                    c_list.append({
-                        "index": i,
-                        "name": name,
-                        "is_controller": True
-                    })
-                first_name = c_list[0]["name"] if c_list else None
-                return {
-                    "success": True,
-                    "connected": len(c_list) > 0,
-                    "count": len(c_list),
-                    "name": first_name or "Ningún mando detectado",
-                    "controllers": c_list
-                }
-            except Exception as e:
-                return {"success": False, "connected": False, "count": 0, "name": "Ningún mando detectado", "error": str(e)}
+                    name = str(c.vendorName() or "Mando Compatible").strip()
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        c_list.append({"index": i, "name": name, "is_controller": True})
+            except Exception:
+                pass
+
+            if not c_list:
+                try:
+                    out = subprocess.check_output(
+                        ["ioreg", "-r", "-c", "IOHIDDevice", "-d", "2"],
+                        text=True, timeout=0.8, stderr=subprocess.DEVNULL
+                    )
+                    ignore_words = ("keyboard", "teclado", "mouse", "ratón", "trackpad", "headset", "audio", "video", "btm", "wakehint")
+                    known_vids = ("= 1356\n", "= 1118\n", "= 1406\n", "= 13866\n", "= 10462\n")  # Sony, MS, Nintendo, Backbone, 8BitDo
+                    for blk in out.split("+-o "):
+                        has_gamepad_usage = ('"PrimaryUsagePage" = 1\n' in blk and ('"PrimaryUsage" = 5\n' in blk or '"PrimaryUsage" = 4\n' in blk))
+                        has_known_vid = any(v in blk for v in known_vids)
+                        has_pad_kw = any(k in blk for k in ("DualSense", "DualShock", "Wireless Controller", "Xbox", "Backbone", "Gamepad", "Pro Controller"))
+                        if not (has_gamepad_usage or has_known_vid or has_pad_kw):
+                            continue
+                        prod_name = None
+                        for line in blk.splitlines():
+                            if '"Product" =' in line:
+                                prod_name = line.split('"Product" =', 1)[1].strip().strip('"')
+                                break
+                        if not prod_name and '"VendorID" = 1356\n' in blk:
+                            prod_name = "DualSense Wireless Controller"
+                        if prod_name:
+                            low = prod_name.lower()
+                            if not any(w in low for w in ignore_words) and prod_name not in seen_names:
+                                seen_names.add(prod_name)
+                                c_list.append({"index": len(c_list), "name": prod_name, "is_controller": True})
+                except Exception:
+                    pass
+
+            first_name = c_list[0]["name"] if c_list else None
+            return {
+                "success": True,
+                "connected": len(c_list) > 0,
+                "count": len(c_list),
+                "name": first_name or "Ningún mando detectado",
+                "controllers": c_list
+            }
         elif sys.platform == "win32":
             try:
                 import ctypes

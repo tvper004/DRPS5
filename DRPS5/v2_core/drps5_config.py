@@ -15,6 +15,13 @@ from typing import Dict, Any, List, Optional
 CONFIG_DIR = Path.home() / ".drps5"
 CONFIG_FILE = CONFIG_DIR / "drps5_config.json"
 
+
+def _active_config_file() -> Path:
+    edition = os.environ.get("DRPS5_EDITION", "personal").strip().lower()
+    if edition == "public":
+        return CONFIG_DIR / "drps5_public_config.json"
+    return CONFIG_FILE
+
 DEFAULT_GAMEPAD_MAPPING: Dict[str, Any] = {
     "ps_button": 5,           # Guía estándar SDL2 (botón PS en DualSense / Xbox / MFi)
     "touchpad_button": 20,    # Touchpad estándar SDL2 en DualSense
@@ -67,17 +74,20 @@ class DRPS5Config:
     @classmethod
     def load(cls) -> Dict[str, Any]:
         cls._ensure_dir()
-        if not CONFIG_FILE.exists():
-            # Buscar si existe una configuración empaquetada inicial junto a la aplicación (seed)
-            bundled_cfg = Path(__file__).resolve().parent / "drps5_config.json"
-            if bundled_cfg.exists():
-                try:
-                    with open(bundled_cfg, "r", encoding="utf-8") as bf:
-                        data = json.load(bf)
-                    cls.save(data)
-                    return data
-                except Exception:
-                    pass
+        cfg_file = _active_config_file()
+        is_public = os.environ.get("DRPS5_EDITION", "personal").strip().lower() == "public"
+
+        if not cfg_file.exists():
+            if not is_public:
+                bundled_cfg = Path(__file__).resolve().parent / "drps5_config.json"
+                if bundled_cfg.exists():
+                    try:
+                        with open(bundled_cfg, "r", encoding="utf-8") as bf:
+                            data = json.load(bf)
+                        cls.save(data)
+                        return data
+                    except Exception:
+                        pass
 
             seed_str = globals().get("_SEED_FALLBACK_JSON")
             if seed_str:
@@ -89,58 +99,73 @@ class DRPS5Config:
                     pass
 
             default_data = DEFAULT_CONFIG.copy()
-            default_prof = create_empty_profile(name="PS5 Principal", local_ip="")
-            default_data["profiles"] = {default_prof["id"]: default_prof}
-            default_data["active_profile_id"] = default_prof["id"]
+            if not is_public:
+                default_prof = create_empty_profile(name="PS5 Principal", local_ip="")
+                default_data["profiles"] = {default_prof["id"]: default_prof}
+                default_data["active_profile_id"] = default_prof["id"]
+            else:
+                default_data["profiles"] = {}
+                default_data["active_profile_id"] = ""
             cls.save(default_data)
             return default_data
 
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(cfg_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # Fusionar con claves por defecto
             for k, v in DEFAULT_CONFIG.items():
                 if k not in data:
                     data[k] = v
 
-            # Sincronizar perfiles y credenciales preconfiguradas desde el paquete de la app
-            bundled_cfg = Path(__file__).resolve().parent / "drps5_config.json"
-            if bundled_cfg.exists():
-                try:
-                    with open(bundled_cfg, "r", encoding="utf-8") as bf:
-                        b_data = json.load(bf)
-                    b_profiles = b_data.get("profiles", {})
-                    b_consoles = b_data.get("consoles", {})
-                    updated = False
-                    for b_id, b_prof in b_profiles.items():
-                        curr_prof = data.get("profiles", {}).get(b_id)
-                        if not curr_prof:
-                            data.setdefault("profiles", {})[b_id] = b_prof
-                            updated = True
-                        elif b_prof.get("rp_key") and (not curr_prof.get("rp_key") or not curr_prof.get("remote_ip")):
-                            if not curr_prof.get("rp_key"):
-                                curr_prof["rp_key"] = b_prof.get("rp_key", "")
-                            if not curr_prof.get("regist_key"):
-                                curr_prof["regist_key"] = b_prof.get("regist_key", "")
-                            if not curr_prof.get("account_id"):
-                                curr_prof["account_id"] = b_prof.get("account_id", "")
-                            if not curr_prof.get("remote_ip"):
-                                curr_prof["remote_ip"] = b_prof.get("remote_ip", "")
-                            updated = True
-                    for c_id, c_val in b_consoles.items():
-                        if c_id not in data.get("consoles", {}):
-                            data.setdefault("consoles", {})[c_id] = c_val
-                            updated = True
-                    if updated:
-                        if "prof_ps5_main" in data.get("profiles", {}):
-                            data["active_profile_id"] = "prof_ps5_main"
-                        cls.save(data)
-                except Exception:
-                    pass
+            # Sincronizar perfiles preconfigurados (archivo adjunto o _SEED_FALLBACK_JSON en edición Personal)
+            seed_sources = []
+            if not is_public:
+                bundled_cfg = Path(__file__).resolve().parent / "drps5_config.json"
+                if bundled_cfg.exists():
+                    try:
+                        with open(bundled_cfg, "r", encoding="utf-8") as bf:
+                            seed_sources.append(json.load(bf))
+                    except Exception:
+                        pass
+                seed_str = globals().get("_SEED_FALLBACK_JSON")
+                if seed_str:
+                    try:
+                        seed_sources.append(json.loads(seed_str))
+                    except Exception:
+                        pass
+
+            updated = False
+            for b_data in seed_sources:
+                b_profiles = b_data.get("profiles", {})
+                b_consoles = b_data.get("consoles", {})
+                for b_id, b_prof in b_profiles.items():
+                    if not b_prof.get("rp_key"):
+                        continue
+                    curr_prof = data.get("profiles", {}).get(b_id)
+                    if not curr_prof:
+                        data.setdefault("profiles", {})[b_id] = dict(b_prof)
+                        updated = True
+                    else:
+                        for fld in ("rp_key", "regist_key", "account_id", "local_ip", "remote_ip", "host_id", "host_name", "host_type", "name"):
+                            if b_prof.get(fld) and not curr_prof.get(fld):
+                                curr_prof[fld] = b_prof[fld]
+                                updated = True
+                for c_id, c_val in b_consoles.items():
+                    if c_id not in data.get("consoles", {}):
+                        data.setdefault("consoles", {})[c_id] = c_val
+                        updated = True
+
+            if updated:
+                cur_act = data.get("active_profile_id", "")
+                if not cur_act or cur_act not in data.get("profiles", {}) or not data["profiles"][cur_act].get("rp_key"):
+                    for pid, pf in data.get("profiles", {}).items():
+                        if pf.get("rp_key"):
+                            data["active_profile_id"] = pid
+                            break
+                cls.save(data)
 
             # Migración: Si no hay perfiles pero hay consolas previas en `consoles`
-            if not data.get("profiles") and data.get("consoles"):
+            if not data.get("profiles") and data.get("consoles") and not is_public:
                 profiles = {}
                 for host_key, c in data["consoles"].items():
                     pid = f"prof_{host_key.replace('.', '_')}"
@@ -149,14 +174,14 @@ class DRPS5Config:
                         "name": c.get("host_name") or "PS5 Principal",
                         "local_ip": c.get("host_ip") or "",
                         "remote_ip": "",
-                        "connection_mode": "local",
+                        "connection_mode": "auto",
                         "host_id": c.get("host_id") or "",
                         "host_name": c.get("host_name") or "PS5",
                         "regist_key": c.get("regist_key") or "",
                         "rp_key": c.get("rp_key") or "",
                         "account_id": c.get("account_id") or "",
                         "status": c.get("status") or "Vinculada",
-                        "resolution": data.get("resolution", "720p"),
+                        "resolution": data.get("resolution", "1080p"),
                         "fps": data.get("fps", 60),
                         "codec": data.get("codec", "hevc"),
                         "hdr": data.get("hdr", False)
@@ -168,8 +193,7 @@ class DRPS5Config:
                     data["active_profile_id"] = next(iter(profiles.keys()))
                 cls.save(data)
 
-            # Si aún está vacío, crear un perfil predeterminado
-            if not data.get("profiles"):
+            if not data.get("profiles") and not is_public:
                 default_prof = create_empty_profile(name="PS5 Principal", local_ip="")
                 data["profiles"] = {default_prof["id"]: default_prof}
                 data["active_profile_id"] = default_prof["id"]
@@ -182,7 +206,8 @@ class DRPS5Config:
     @classmethod
     def save(cls, config: Dict[str, Any]):
         cls._ensure_dir()
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        cfg_file = _active_config_file()
+        with open(cfg_file, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
 
     @classmethod

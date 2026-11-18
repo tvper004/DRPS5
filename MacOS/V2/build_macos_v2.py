@@ -135,6 +135,58 @@ def build_core_pak(out_pak: Path, seed_cfg: dict) -> bytes:
     return key
 
 
+def compile_cas_dylib(out_dylib: Path):
+    c_src = """
+#include <stdint.h>
+#include <string.h>
+
+void drps5_cas_rgb24(const uint8_t * __restrict src, uint8_t * __restrict dst, int w, int h, int stride, int strength_q8) {
+    if (w < 3 || h < 3 || strength_q8 <= 0) {
+        for (int y = 0; y < h; y++) memcpy(dst + y * w * 3, src + y * stride, w * 3);
+        return;
+    }
+    memcpy(dst, src, w * 3);
+    memcpy(dst + (h - 1) * w * 3, src + (h - 1) * stride, w * 3);
+    for (int y = 1; y < h - 1; y++) {
+        const uint8_t *row_u = src + (y - 1) * stride;
+        const uint8_t *row_c = src + y * stride;
+        const uint8_t *row_d = src + (y + 1) * stride;
+        uint8_t *out = dst + y * w * 3;
+        out[0] = row_c[0]; out[1] = row_c[1]; out[2] = row_c[2];
+        for (int x = 1; x < w - 1; x++) {
+            int i = x * 3;
+            for (int c = 0; c < 3; c++) {
+                int v_u = row_u[i + c];
+                int v_d = row_d[i + c];
+                int v_l = row_c[i - 3 + c];
+                int v_r = row_c[i + 3 + c];
+                int v_c = row_c[i + c];
+                int mn = v_c;
+                if (v_u < mn) mn = v_u; if (v_d < mn) mn = v_d; if (v_l < mn) mn = v_l; if (v_r < mn) mn = v_r;
+                int mx = v_c;
+                if (v_u > mx) mx = v_u; if (v_d > mx) mx = v_d; if (v_l > mx) mx = v_l; if (v_r > mx) mx = v_r;
+                int amp = (mn < (255 - mx)) ? mn : (255 - mx);
+                int w_q8 = (amp * strength_q8) >> 8;
+                int lap = (4 * v_c) - (v_u + v_d + v_l + v_r);
+                int res = v_c + ((lap * w_q8) >> 9);
+                out[i + c] = (uint8_t)(res < 0 ? 0 : (res > 255 ? 255 : res));
+            }
+        }
+        int last = (w - 1) * 3;
+        out[last] = row_c[last]; out[last + 1] = row_c[last + 1]; out[last + 2] = row_c[last + 2];
+    }
+}
+"""
+    c_file = out_dylib.parent / "drps5_cas.c"
+    c_file.write_text(c_src, encoding="utf-8")
+    subprocess.run([
+        "clang", "-O3", "-arch", "arm64", "-arch", "x86_64",
+        "-mmacosx-version-min=11.0", "-dynamiclib",
+        str(c_file), "-o", str(out_dylib)
+    ], check=True)
+    c_file.unlink()
+
+
 def compile_universal_launcher(out_bin: Path, pak_key: bytes, is_personal: bool):
     xor_mask = secrets.token_bytes(32)
     enc_key = bytes(pak_key[i] ^ xor_mask[i] for i in range(32))
@@ -155,7 +207,6 @@ def compile_universal_launcher(out_bin: Path, pak_key: bytes, is_personal: bool)
 typedef void (*py_init_fn)(void);
 typedef int (*py_run_fn)(const char *);
 typedef void (*py_fin_fn)(void);
-typedef void (*py_set_home_fn)(const wchar_t *);
 
 static const unsigned char ENC_KEY[32] = {{ {c_arr(enc_key)} }};
 static const unsigned char XOR_MASK[32] = {{ {c_arr(xor_mask)} }};
@@ -165,9 +216,13 @@ int main(int argc, char **argv) {{
     uint32_t sz = sizeof(exe_path);
     if (_NSGetExecutablePath(exe_path, &sz) != 0) return 1;
     char *real = realpath(exe_path, NULL);
+    char bin_copy[4096];
+    snprintf(bin_copy, sizeof(bin_copy), "%s", real ? real : exe_path);
     char *dir = dirname(real ? real : exe_path);
-    char res_dir[4096];
-    snprintf(res_dir, sizeof(res_dir), "%s/../Resources", dir);
+    char res_ref[4096];
+    snprintf(res_ref, sizeof(res_ref), "%s/../Resources", dir);
+    char *res_real = realpath(res_ref, NULL);
+    const char *res_dir = res_real ? res_real : res_ref;
 
     char site_dir[4096];
 #if defined(__arm64__) || defined(__aarch64__)
@@ -177,8 +232,11 @@ int main(int argc, char **argv) {{
 #endif
     setenv("PYTHONPATH", site_dir, 1);
     setenv("DRPS5_RESOURCES_DIR", res_dir, 1);
+    setenv("RESOURCEPATH", res_dir, 1);
+    setenv("DRPS5_BIN", bin_copy, 1);
     setenv("DRPS5_EDITION", "{edition_val}", 1);
     setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+    chdir(res_dir);
 
     const char *fw_candidates[] = {{
         "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Python3",
@@ -214,6 +272,8 @@ int main(int argc, char **argv) {{
     snprintf(boot, sizeof(boot),
         "import os, sys, json, zlib, hashlib, importlib.abc, importlib.util\\n"
         "res = os.environ['DRPS5_RESOURCES_DIR']\\n"
+        "os.chdir(res)\\n"
+        "sys.argv = [os.path.join(res, 'drps5.py')] + [a for a in getattr(sys, 'argv', [])[1:] if a]\\n"
         "pak = open(os.path.join(res, 'core.pak'), 'rb').read()\\n"
         "key = bytes.fromhex('%s')\\n"
         "dec = bytearray(len(pak))\\n"
@@ -240,7 +300,6 @@ int main(int argc, char **argv) {{
         "            mod.__path__ = [os.path.join(res, *mod.__name__.split('.'))]\\n"
         "        exec(compile(mods[mod.__name__], '<vault:' + mod.__name__ + '>', 'exec'), mod.__dict__)\\n"
         "sys.meta_path.insert(0, _VaultLoader())\\n"
-        "if not getattr(sys, 'argv', None): sys.argv = [os.path.join(res, 'drps5.py')]\\n"
         "import drps5\\n"
         "drps5.main()\\n",
         hex_key
@@ -289,7 +348,7 @@ def build_edition(is_personal: bool):
     macos_dir.mkdir(parents=True)
     res_dir.mkdir(parents=True)
 
-    # Info.plist
+    # Info.plist completo con permisos de red local (ATS WKWebView), GameController y Game Mode de macOS
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -297,13 +356,29 @@ def build_edition(is_personal: bool):
     <key>CFBundleName</key><string>DRPS5</string>
     <key>CFBundleDisplayName</key><string>DRPS5 Remote Play</string>
     <key>CFBundleIdentifier</key><string>com.drps5.remoteplay</string>
-    <key>CFBundleVersion</key><string>2.0.0</string>
-    <key>CFBundleShortVersionString</key><string>2.0.0</string>
+    <key>CFBundleVersion</key><string>2.0.17</string>
+    <key>CFBundleShortVersionString</key><string>2.0.17</string>
     <key>CFBundleExecutable</key><string>DRPS5</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>GCSupportsGameMode</key><true/>
+    <key>LSSupportsGameMode</key><true/>
+    <key>GCSupportsControllerUserInteraction</key><true/>
+    <key>GCSupportedGameControllers</key>
+    <array>
+        <dict><key>ProfileName</key><string>ExtendedGamepad</string></dict>
+        <dict><key>ProfileName</key><string>DirectionalGamepad</string></dict>
+        <dict><key>ProfileName</key><string>MicroGamepad</string></dict>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key><true/>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
 </dict>
 </plist>
 """
@@ -317,9 +392,20 @@ def build_edition(is_personal: bool):
     shutil.copytree(GUI_V2_DIR, res_dir / "gui", dirs_exist_ok=True)
 
     populate_venvs(res_dir)
+    compile_cas_dylib(res_dir / "libdrps5_cas.dylib")
     seed = PERSONAL_SEED_CONFIG if is_personal else PUBLIC_SEED_CONFIG
     pak_key = build_core_pak(res_dir / "core.pak", seed)
     compile_universal_launcher(macos_dir / "DRPS5", pak_key, is_personal)
+
+    # Firma ad-hoc para que macOS GameController / WKWebView / TCC reconozcan la identidad del paquete
+    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app_dir)], check=False)
+
+    if is_personal:
+        installed_app = Path("/Applications/DRPS5.app")
+        if installed_app.exists():
+            shutil.rmtree(installed_app)
+        shutil.copytree(app_dir, installed_app, symlinks=True)
+        print(f"Installed Personal edition to {installed_app}")
 
     # Create symlink to /Applications inside DMG stage
     os.symlink("/Applications", stage / "Applications")
