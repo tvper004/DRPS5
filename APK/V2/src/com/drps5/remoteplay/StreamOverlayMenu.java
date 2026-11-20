@@ -10,9 +10,12 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * WebOS V2-inspired frosted dark in-stream overlay menu (COL_SHEET + live chips + quick toggles).
+ * Soporta navegación fluida por Control Remoto (TV), Cruceta (D-Pad) y Análogo Izquierdo.
  */
 public final class StreamOverlayMenu extends FrameLayout {
     public interface Listener {
@@ -30,6 +33,10 @@ public final class StreamOverlayMenu extends FrameLayout {
     private final TextView btnTouch;
     private final TextView btnCompactHud;
     private final TextView btnResume;
+    private final TextView btnDisconnect;
+    private final List<TextView> actionButtons = new ArrayList<>();
+    private int selectedIndex = 0;
+    private final ScrollView scroll;
     private final Listener listener;
 
     public StreamOverlayMenu(Context ctx, ConfigStore cfg, Listener listener) {
@@ -40,8 +47,10 @@ public final class StreamOverlayMenu extends FrameLayout {
         setClickable(true);
         setFocusable(false);
 
-        ScrollView scroll = new ScrollView(ctx);
+        scroll = new ScrollView(ctx);
         scroll.setVerticalScrollBarEnabled(false);
+        scroll.setFocusable(false);
+        scroll.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
         FrameLayout.LayoutParams scLp = new FrameLayout.LayoutParams(
             WebOSTheme.dp(ctx, 560), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
         scLp.topMargin = WebOSTheme.dp(ctx, 8);
@@ -50,6 +59,8 @@ public final class StreamOverlayMenu extends FrameLayout {
 
         LinearLayout sheet = new LinearLayout(ctx);
         sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setFocusable(false);
+        sheet.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
         sheet.setPadding(WebOSTheme.dp(ctx, 20), WebOSTheme.dp(ctx, 14), WebOSTheme.dp(ctx, 20), WebOSTheme.dp(ctx, 14));
         sheet.setBackground(WebOSTheme.makeCardDrawable(ctx, WebOSTheme.COL_SHEET, WebOSTheme.COL_FROST_BORDER, 20, 1));
         scroll.addView(sheet, new FrameLayout.LayoutParams(
@@ -102,14 +113,7 @@ public final class StreamOverlayMenu extends FrameLayout {
         });
         sheet.addView(btnCompactHud, rowLp(ctx));
 
-        TextView btnPs = makeActionBtn(ctx, "⌘  Pulsar Boton PS", false);
-        btnPs.setOnClickListener(v -> {
-            if (listener != null) listener.onSendPsButton();
-            hideMenu();
-        });
-        sheet.addView(btnPs, rowLp(ctx));
-
-        TextView btnDisconnect = makeActionBtn(ctx, "✕  Desconectar sesion", false);
+        btnDisconnect = makeActionBtn(ctx, "✕  Desconectar sesion", false);
         btnDisconnect.setTextColor(WebOSTheme.COL_PS_CIRCLE);
         btnDisconnect.setOnClickListener(v -> {
             hideMenu();
@@ -128,7 +132,12 @@ public final class StreamOverlayMenu extends FrameLayout {
 
     public void showMenu() {
         setVisibility(VISIBLE);
-        btnResume.requestFocus();
+        selectedIndex = 0;
+        if (!actionButtons.isEmpty()) {
+            TextView first = actionButtons.get(0);
+            first.requestFocus();
+            scroll.smoothScrollTo(0, 0);
+        }
     }
 
     public void hideMenu() {
@@ -139,6 +148,20 @@ public final class StreamOverlayMenu extends FrameLayout {
         return getVisibility() == VISIBLE;
     }
 
+    public void moveSelection(int delta) {
+        if (actionButtons.isEmpty()) return;
+        selectedIndex = Math.max(0, Math.min(actionButtons.size() - 1, selectedIndex + delta));
+        TextView target = actionButtons.get(selectedIndex);
+        target.requestFocus();
+        scroll.requestChildFocus(target, target);
+    }
+
+    public void activateCurrent() {
+        if (selectedIndex >= 0 && selectedIndex < actionButtons.size()) {
+            actionButtons.get(selectedIndex).performClick();
+        }
+    }
+
     private static LinearLayout.LayoutParams rowLp(Context ctx) {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -146,7 +169,7 @@ public final class StreamOverlayMenu extends FrameLayout {
         return lp;
     }
 
-    private static TextView makeActionBtn(Context ctx, String text, boolean primary) {
+    private TextView makeActionBtn(Context ctx, String text, boolean primary) {
         TextView tv = new TextView(ctx);
         tv.setText(text);
         tv.setTextColor(WebOSTheme.COL_TEXT);
@@ -156,12 +179,18 @@ public final class StreamOverlayMenu extends FrameLayout {
         tv.setFocusable(true);
         tv.setClickable(true);
         tv.setBackground(primary ? WebOSTheme.makeAccentSelector(ctx, 12) : WebOSTheme.makeFrostSelector(ctx, 12));
+        
+        final int myIdx = actionButtons.size();
         tv.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) {
+                selectedIndex = myIdx;
+            }
             if (!primary) {
-                tv.setTextColor(hasFocus ? WebOSTheme.COL_ON_FROST : WebOSTheme.COL_TEXT);
+                tv.setTextColor(hasFocus ? WebOSTheme.COL_ON_FROST : (v == btnDisconnect ? WebOSTheme.COL_PS_CIRCLE : WebOSTheme.COL_TEXT));
             }
             v.animate().scaleX(hasFocus ? 1.02f : 1.0f).scaleY(hasFocus ? 1.02f : 1.0f).setDuration(100).start();
         });
+        actionButtons.add(tv);
         return tv;
     }
 }

@@ -208,15 +208,12 @@ import java.util.Arrays;
                 drawCapsule(canvas, 0.08f * w, topY, shW, shH, "L1", 0x84);
                 drawCapsule(canvas, 0.18f * w, topY, shW, shH, "L2", 0x86);
 
-                // 2. Botones de Sistema: SHARE, TOUCHPAD (amplio y táctil), OPTION
+                // 2. Botones de Sistema: SHARE, TOUCHPAD (botón directo), OPTION
                 drawCapsule(canvas, 0.30f * w, topY, 26f * density, 15f * density, "SHARE", 0x8D);
                 boolean tpActive = (touchpadPointerId != -1) || touchBtnPressed[0x91];
                 canvas.drawRoundRect(touchpadRect, 14f * density, 14f * density, tpActive ? pressedBgPaint : bgPaint);
                 canvas.drawRoundRect(touchpadRect, 14f * density, 14f * density, borderPaint);
-                canvas.drawText("TOUCHPAD", touchpadRect.centerX(), touchpadRect.top + 19f * density, textPaint);
-                if (touchpadPointerId != -1) {
-                    canvas.drawCircle(touchpadCurX, touchpadCurY, 10f * density, borderPaint);
-                }
+                canvas.drawText("TOUCHPAD", touchpadRect.centerX(), touchpadRect.centerY() + 5f * density, textPaint);
                 drawCapsule(canvas, 0.70f * w, topY, 26f * density, 15f * density, "OPT", 0x8C);
 
                 // 3. Shoulders: R2 y R1 horizontales a la derecha
@@ -404,16 +401,13 @@ import java.util.Arrays;
 
             if (touchpadRect.contains(x, y) && touchpadPointerId == -1) {
                 touchpadPointerId = pId;
-                pointerAction[actIdx] = -4;
-                touchpadDownX = x;
-                touchpadDownY = y;
-                touchpadCurX = x;
-                touchpadCurY = y;
-                touchpadMaxDrag = 0f;
+                pointerAction[actIdx] = 0x91;
+                touchBtnPressed[0x91] = true;
                 try { performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); } catch (Throwable ignored) {}
                 if (target != null) {
-                    target.sendTouchpadEvent(true, 0, tpCoordX(x), tpCoordY(y));
+                    target.sendButtonEvent(0x91, true);
                 }
+                invalidate();
                 return;
             }
 
@@ -459,13 +453,7 @@ import java.util.Arrays;
             } else if (pId == rStickPointerId) {
                 updateRightStick(x, y);
             } else if (pId == touchpadPointerId) {
-                touchpadCurX = Math.max(touchpadRect.left, Math.min(touchpadRect.right, x));
-                touchpadCurY = Math.max(touchpadRect.top, Math.min(touchpadRect.bottom, y));
-                float drag = (float) Math.hypot(touchpadCurX - touchpadDownX, touchpadCurY - touchpadDownY);
-                if (drag > touchpadMaxDrag) touchpadMaxDrag = drag;
-                if (target != null) {
-                    target.sendTouchpadEvent(true, 0, tpCoordX(touchpadCurX), tpCoordY(touchpadCurY));
-                }
+                // El botón táctil se mantiene activo sin desplazar puntero
             }
         }
 
@@ -489,15 +477,11 @@ import java.util.Arrays;
                 }
             } else if (pId == touchpadPointerId) {
                 touchpadPointerId = -1;
+                touchBtnPressed[0x91] = false;
                 if (target != null) {
-                    target.sendTouchpadEvent(false, 0, tpCoordX(touchpadCurX), tpCoordY(touchpadCurY));
-                    if (touchpadMaxDrag < 14f * density) {
-                        target.sendButtonEvent(0x91, true);
-                        postDelayed(() -> {
-                            if (target != null) target.sendButtonEvent(0x91, false);
-                        }, 90);
-                    }
+                    target.sendButtonEvent(0x91, false);
                 }
+                invalidate();
             } else {
                 int code = pointerAction[actIdx];
                 if (code >= 0 && code < 256) {

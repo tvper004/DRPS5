@@ -1494,24 +1494,26 @@ public final class MainActivity extends Activity {
         }
 
         if (streamOverlayMenu.isMenuOpen()) {
-            if (rawSony && psBtn != -1) {
-                if (psBtn >= 0x80 && psBtn <= 0x83) {
-                    return super.dispatchKeyEvent(event);
+            if (down && event.getRepeatCount() == 0) {
+                if (code == KeyEvent.KEYCODE_DPAD_UP || psBtn == 0x80) {
+                    streamOverlayMenu.moveSelection(-1);
+                    return true;
                 }
-                if (down && event.getRepeatCount() == 0) {
-                    if (psBtn == confirmBtn) {
-                        performFocusedClick();
-                    } else if (psBtn == cancelBtn) {
-                        streamOverlayMenu.hideMenu();
-                    }
+                if (code == KeyEvent.KEYCODE_DPAD_DOWN || psBtn == 0x81) {
+                    streamOverlayMenu.moveSelection(1);
+                    return true;
                 }
-                return true;
+                if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
+                    || code == KeyEvent.KEYCODE_BUTTON_A || psBtn == confirmBtn) {
+                    streamOverlayMenu.activateCurrent();
+                    return true;
+                }
+                if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_BUTTON_B || psBtn == cancelBtn) {
+                    streamOverlayMenu.hideMenu();
+                    return true;
+                }
             }
-            if (down && (code == KeyEvent.KEYCODE_BACK || psBtn == cancelBtn)) {
-                streamOverlayMenu.hideMenu();
-                return true;
-            }
-            return super.dispatchKeyEvent(event);
+            return true;
         }
 
         if (psBtn == 0x8D || code == KeyEvent.KEYCODE_BUTTON_SELECT) gpShareDown = down;
@@ -1605,7 +1607,45 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (streaming && !streamOverlayMenu.isMenuOpen()) {
+            int src = ev.getSource();
+            boolean isMouseOrTouchpad = (src & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE
+                || (src & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD;
+            if (isMouseOrTouchpad) {
+                int action = ev.getActionMasked();
+                if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_BUTTON_PRESS) {
+                    if (streamClient != null) streamClient.sendButtonEvent(0x91, true);
+                    return true;
+                } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_BUTTON_RELEASE || action == MotionEvent.ACTION_CANCEL) {
+                    if (streamClient != null) streamClient.sendButtonEvent(0x91, false);
+                    return true;
+                }
+                if (action == MotionEvent.ACTION_MOVE) {
+                    return true;
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    @Override
     public boolean dispatchGenericMotionEvent(MotionEvent ev) {
+        if ((ev.getSource() & (InputDevice.SOURCE_MOUSE | InputDevice.SOURCE_TOUCHPAD)) != 0) {
+            if (streaming && !streamOverlayMenu.isMenuOpen()) {
+                int action = ev.getActionMasked();
+                if (action == MotionEvent.ACTION_BUTTON_PRESS) {
+                    if (streamClient != null) streamClient.sendButtonEvent(0x91, true);
+                    return true;
+                } else if (action == MotionEvent.ACTION_BUTTON_RELEASE) {
+                    if (streamClient != null) streamClient.sendButtonEvent(0x91, false);
+                    return true;
+                } else if (action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_MOVE) {
+                    return true;
+                }
+            }
+        }
+
         if ((ev.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK &&
             ev.getAction() == MotionEvent.ACTION_MOVE) {
             InputDevice dev = ev.getDevice();
@@ -1682,6 +1722,28 @@ public final class MainActivity extends Activity {
                 return true;
             }
 
+            if (streaming && streamOverlayMenu != null && streamOverlayMenu.isMenuOpen()) {
+                if (hUp != hatUpActive) {
+                    hatUpActive = hUp;
+                    if (hUp) streamOverlayMenu.moveSelection(-1);
+                }
+                if (hDown != hatDownActive) {
+                    hatDownActive = hDown;
+                    if (hDown) streamOverlayMenu.moveSelection(1);
+                }
+                long now = SystemClock.uptimeMillis();
+                if (now - lastStickNavMs > 210) {
+                    if (ly < -0.55f) {
+                        lastStickNavMs = now;
+                        streamOverlayMenu.moveSelection(-1);
+                    } else if (ly > 0.55f) {
+                        lastStickNavMs = now;
+                        streamOverlayMenu.moveSelection(1);
+                    }
+                }
+                return true;
+            }
+
             // Menu & Overlay D-Pad HAT + Left Stick navigation
             if (hUp != hatUpActive) {
                 hatUpActive = hUp;
@@ -1748,6 +1810,9 @@ public final class MainActivity extends Activity {
     private int mapEventToPsButton(KeyEvent event, boolean rawSony) {
         int keyCode = event.getKeyCode();
         int sc = event.getScanCode();
+        InputDevice dev = event.getDevice();
+        boolean isSony = (dev != null && (dev.getVendorId() == 0x054c ||
+            (dev.getName() != null && (dev.getName().contains("DualSense") || dev.getName().contains("Wireless Controller")))));
 
         if (rawSony) {
             switch (keyCode) {
@@ -1830,7 +1895,7 @@ public final class MainActivity extends Activity {
             case 314: return 0x8D; // Share
             case 315: return 0x8C; // Options
             case 316: return 0x8E; // PS
-            case 317: return 0x8F; // L3
+            case 317: return isSony ? 0x91 : 0x8F; // Touchpad en Sony / L3 en genericos
             case 318: return 0x90; // R3
             default:  return -1;
         }
