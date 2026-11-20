@@ -19,9 +19,11 @@ import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.PointerIcon;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -52,7 +54,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
-    private static final String APP_VERSION = "2.0.18";
+    private static final String APP_VERSION = "2.0.20";
 
     private ConfigStore cfg;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -94,6 +96,7 @@ public final class MainActivity extends Activity {
     private TouchGamepadOverlayView touchOverlay;
     private StreamOverlayMenu streamOverlayMenu;
     private TextView streamHudPill;
+    private TextView touchpadPill;
     private String lastHudStatsText = "";
     private PS5StreamClient streamClient;
     private boolean streaming = false;
@@ -1164,6 +1167,29 @@ public final class MainActivity extends Activity {
         streamContainer.setBackgroundColor(Color.BLACK);
         streamContainer.setVisibility(View.GONE);
 
+        // Suprimir cursor de raton en Android para evitar que se mueva puntero en pantalla
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                streamContainer.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
+            } catch (Throwable ignored) {}
+        }
+
+        // Toque directo en la pantalla del juego funciona como boton Touchpad (0x91) directo y sostenido
+        streamContainer.setOnTouchListener((v, ev) -> {
+            if (!streaming || streamOverlayMenu.isMenuOpen()) return false;
+            if (touchOverlay != null && touchOverlay.getVisibility() == View.VISIBLE) return false;
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                if (streamClient != null) streamClient.sendButtonEvent(0x91, true);
+                try { v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); } catch (Throwable ignored) {}
+                return true;
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                if (streamClient != null) streamClient.sendButtonEvent(0x91, false);
+                return true;
+            }
+            return false;
+        });
+
         touchOverlay = new TouchGamepadOverlayView(this);
         touchOverlay.setInputTarget(new TouchGamepadOverlayView.InputTarget() {
             @Override
@@ -1176,7 +1202,7 @@ public final class MainActivity extends Activity {
             }
             @Override
             public void sendTouchpadEvent(boolean down, int pointerId, int x, int y) {
-                if (streamClient != null) streamClient.sendTouchpadEvent(down, pointerId, x, y);
+                if (streamClient != null) streamClient.sendButtonEvent(0x91, down);
             }
             @Override
             public void onMenuRequested() {
@@ -1184,6 +1210,31 @@ public final class MainActivity extends Activity {
             }
         });
         touchOverlay.setVisibility(View.GONE);
+
+        // Boton Touchpad flotante en la parte superior central
+        touchpadPill = WebOSTheme.makePill(this, "⬜ TOUCHPAD", 0xAA070B16, WebOSTheme.COL_TEXT);
+        touchpadPill.setTextSize(11f);
+        touchpadPill.setClickable(true);
+        touchpadPill.setFocusable(false);
+        touchpadPill.setOnTouchListener((v, ev) -> {
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                touchpadPill.setBackground(WebOSTheme.makeCardDrawable(this, WebOSTheme.COL_ACCENT, WebOSTheme.COL_ACCENT_HI, 50, 2));
+                touchpadPill.setTextColor(0xFFFFFFFF);
+                if (streamClient != null) streamClient.sendButtonEvent(0x91, true);
+                try { v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); } catch (Throwable ignored) {}
+                return true;
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                touchpadPill.setBackground(WebOSTheme.makeCardDrawable(this, 0xAA070B16, 0x33FFFFFF, 50, 1));
+                touchpadPill.setTextColor(WebOSTheme.COL_TEXT);
+                if (streamClient != null) streamClient.sendButtonEvent(0x91, false);
+                return true;
+            }
+            return false;
+        });
+        FrameLayout.LayoutParams tplp = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        tplp.topMargin = WebOSTheme.dp(this, 12);
 
         streamHudPill = WebOSTheme.makePill(this, "Conectando...", 0xAA070B16, WebOSTheme.COL_TEXT);
         streamHudPill.setTextSize(10.5f);
@@ -1197,6 +1248,15 @@ public final class MainActivity extends Activity {
         streamOverlayMenu = new StreamOverlayMenu(this, cfg, new StreamOverlayMenu.Listener() {
             @Override
             public void onResumeGame() {}
+            @Override
+            public void onSendTouchpad() {
+                if (streamClient != null) {
+                    streamClient.sendButtonEvent(0x91, true);
+                    uiHandler.postDelayed(() -> {
+                        if (streamClient != null) streamClient.sendButtonEvent(0x91, false);
+                    }, 250);
+                }
+            }
             @Override
             public void onCycleUpscale() {
                 String[] opts = { "auto", "cas_high", "cas_med", "direct" };
@@ -1225,15 +1285,6 @@ public final class MainActivity extends Activity {
                 updateStreamOverlayInfo();
             }
             @Override
-            public void onSendPsButton() {
-                if (streamClient != null) {
-                    streamClient.sendButtonEvent(0x8E, true);
-                    uiHandler.postDelayed(() -> {
-                        if (streamClient != null) streamClient.sendButtonEvent(0x8E, false);
-                    }, 120);
-                }
-            }
-            @Override
             public void onDisconnect() {
                 stopStreamSession();
             }
@@ -1241,6 +1292,7 @@ public final class MainActivity extends Activity {
 
         streamContainer.addView(touchOverlay, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        streamContainer.addView(touchpadPill, tplp);
         streamContainer.addView(streamHudPill, hlp);
         streamContainer.addView(streamOverlayMenu, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1504,11 +1556,11 @@ public final class MainActivity extends Activity {
                     return true;
                 }
                 if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
-                    || code == KeyEvent.KEYCODE_BUTTON_A || psBtn == confirmBtn) {
+                    || code == KeyEvent.KEYCODE_NUMPAD_ENTER || code == KeyEvent.KEYCODE_BUTTON_A || psBtn == confirmBtn) {
                     streamOverlayMenu.activateCurrent();
                     return true;
                 }
-                if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_BUTTON_B || psBtn == cancelBtn) {
+                if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_BUTTON_B || psBtn == cancelBtn || code == KeyEvent.KEYCODE_ESCAPE) {
                     streamOverlayMenu.hideMenu();
                     return true;
                 }
@@ -1519,7 +1571,9 @@ public final class MainActivity extends Activity {
         if (psBtn == 0x8D || code == KeyEvent.KEYCODE_BUTTON_SELECT) gpShareDown = down;
         if (psBtn == 0x8C || code == KeyEvent.KEYCODE_BUTTON_START) gpOptionsDown = down;
 
-        if (down && ((gpShareDown && gpOptionsDown) || code == KeyEvent.KEYCODE_MENU)) {
+        if (down && ((gpShareDown && gpOptionsDown) || code == KeyEvent.KEYCODE_MENU
+            || code == KeyEvent.KEYCODE_SETTINGS || code == KeyEvent.KEYCODE_INFO
+            || code == KeyEvent.KEYCODE_GUIDE || code == KeyEvent.KEYCODE_PROG_RED)) {
             gpShareDown = false;
             gpOptionsDown = false;
             toggleStreamOverlayMenu();
@@ -1528,13 +1582,7 @@ public final class MainActivity extends Activity {
 
         if (code == KeyEvent.KEYCODE_BACK && psBtn == -1) {
             if (down) {
-                long now = SystemClock.uptimeMillis();
-                if (now - lastBackPressMs < 1500) {
-                    toggleStreamOverlayMenu();
-                } else {
-                    lastBackPressMs = now;
-                    Toast.makeText(this, "Pulsa Atras de nuevo para abrir el menu", Toast.LENGTH_SHORT).show();
-                }
+                toggleStreamOverlayMenu();
             }
             return true;
         }
@@ -1732,11 +1780,11 @@ public final class MainActivity extends Activity {
                     if (hDown) streamOverlayMenu.moveSelection(1);
                 }
                 long now = SystemClock.uptimeMillis();
-                if (now - lastStickNavMs > 210) {
-                    if (ly < -0.55f) {
+                if (now - lastStickNavMs > 190) {
+                    if (ly < -0.40f) {
                         lastStickNavMs = now;
                         streamOverlayMenu.moveSelection(-1);
-                    } else if (ly > 0.55f) {
+                    } else if (ly > 0.40f) {
                         lastStickNavMs = now;
                         streamOverlayMenu.moveSelection(1);
                     }
@@ -1814,6 +1862,11 @@ public final class MainActivity extends Activity {
         boolean isSony = (dev != null && (dev.getVendorId() == 0x054c ||
             (dev.getName() != null && (dev.getName().contains("DualSense") || dev.getName().contains("Wireless Controller")))));
 
+        // Touchpad prioritario en DualSense / Sony: scancode 317 o KEYCODE_BUTTON_THUMBL
+        if (sc == 317 || (isSony && keyCode == KeyEvent.KEYCODE_BUTTON_THUMBL)) {
+            return 0x91;
+        }
+
         if (rawSony) {
             switch (keyCode) {
                 case KeyEvent.KEYCODE_DPAD_UP:       return 0x80;
@@ -1876,7 +1929,7 @@ public final class MainActivity extends Activity {
             case KeyEvent.KEYCODE_BUTTON_START:  return 0x8C;
             case KeyEvent.KEYCODE_BUTTON_SELECT: return 0x8D;
             case KeyEvent.KEYCODE_BUTTON_MODE:   return 0x8E;
-            case KeyEvent.KEYCODE_BUTTON_THUMBL: return 0x8F;
+            case KeyEvent.KEYCODE_BUTTON_THUMBL: return (isSony || sc == 317) ? 0x91 : 0x8F;
             case KeyEvent.KEYCODE_BUTTON_THUMBR: return 0x90;
             case KeyEvent.KEYCODE_BUTTON_1:
             case KeyEvent.KEYCODE_BUTTON_C:      return 0x91;
@@ -1895,7 +1948,7 @@ public final class MainActivity extends Activity {
             case 314: return 0x8D; // Share
             case 315: return 0x8C; // Options
             case 316: return 0x8E; // PS
-            case 317: return isSony ? 0x91 : 0x8F; // Touchpad en Sony / L3 en genericos
+            case 317: return 0x91; // Touchpad
             case 318: return 0x90; // R3
             default:  return -1;
         }

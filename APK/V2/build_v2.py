@@ -297,8 +297,8 @@ def write_manifest(manifest_path: Path, is_personal: bool):
     manifest = f"""<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.drps5.remoteplay"
-    android:versionCode="205"
-    android:versionName="2.0.19">
+    android:versionCode="206"
+    android:versionName="2.0.20">
 
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="34" />
 

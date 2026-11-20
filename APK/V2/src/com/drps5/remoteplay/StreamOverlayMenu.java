@@ -20,19 +20,20 @@ import java.util.List;
 public final class StreamOverlayMenu extends FrameLayout {
     public interface Listener {
         void onResumeGame();
+        void onSendTouchpad();
         void onCycleUpscale();
         void onToggleTouchControls();
         void onToggleCompactHud();
-        void onSendPsButton();
         void onDisconnect();
     }
 
     private final TextView chipQuality;
     private final TextView chipTelemetry;
+    private final TextView btnResume;
+    private final TextView btnTouchpad;
     private final TextView btnUpscale;
     private final TextView btnTouch;
     private final TextView btnCompactHud;
-    private final TextView btnResume;
     private final TextView btnDisconnect;
     private final List<TextView> actionButtons = new ArrayList<>();
     private int selectedIndex = 0;
@@ -95,6 +96,13 @@ public final class StreamOverlayMenu extends FrameLayout {
         });
         sheet.addView(btnResume, rowLp(ctx));
 
+        btnTouchpad = makeActionBtn(ctx, "⬜  Pulsar Boton Touchpad", false);
+        btnTouchpad.setOnClickListener(v -> {
+            hideMenu();
+            if (listener != null) listener.onSendTouchpad();
+        });
+        sheet.addView(btnTouchpad, rowLp(ctx));
+
         btnUpscale = makeActionBtn(ctx, "✦  Reescalado GPU: " + cfg.getUpscaleLabel(), false);
         btnUpscale.setOnClickListener(v -> {
             if (listener != null) listener.onCycleUpscale();
@@ -133,11 +141,10 @@ public final class StreamOverlayMenu extends FrameLayout {
     public void showMenu() {
         setVisibility(VISIBLE);
         selectedIndex = 0;
-        if (!actionButtons.isEmpty()) {
-            TextView first = actionButtons.get(0);
-            first.requestFocus();
+        post(() -> {
+            updateVisualSelection();
             scroll.smoothScrollTo(0, 0);
-        }
+        });
     }
 
     public void hideMenu() {
@@ -150,10 +157,23 @@ public final class StreamOverlayMenu extends FrameLayout {
 
     public void moveSelection(int delta) {
         if (actionButtons.isEmpty()) return;
-        selectedIndex = Math.max(0, Math.min(actionButtons.size() - 1, selectedIndex + delta));
-        TextView target = actionButtons.get(selectedIndex);
-        target.requestFocus();
-        scroll.requestChildFocus(target, target);
+        selectedIndex = (selectedIndex + delta + actionButtons.size()) % actionButtons.size();
+        updateVisualSelection();
+    }
+
+    public void updateVisualSelection() {
+        if (actionButtons.isEmpty()) return;
+        for (int i = 0; i < actionButtons.size(); i++) {
+            TextView btn = actionButtons.get(i);
+            boolean isSel = (i == selectedIndex);
+            if (isSel) {
+                btn.requestFocus();
+                btn.animate().scaleX(1.03f).scaleY(1.03f).setDuration(80).start();
+                scroll.requestChildFocus(btn, btn);
+            } else {
+                btn.animate().scaleX(1.0f).scaleY(1.0f).setDuration(80).start();
+            }
+        }
     }
 
     public void activateCurrent() {

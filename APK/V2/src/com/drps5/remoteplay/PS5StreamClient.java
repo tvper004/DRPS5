@@ -2070,25 +2070,9 @@ public final class PS5StreamClient {
     }
 
     public void sendTouchpadEvent(boolean down, int pointerId, int x, int y) {
-        if (streamCipher == null || udpSocket == null) return;
-        int cx = Math.max(0, Math.min(1919, x));
-        int cy = Math.max(0, Math.min(941, y));
-        synchronized (sendLock) {
-            try {
-                if (fbTouchDatagram == null && hostAddress != null) {
-                    fbTouchDatagram = new DatagramPacket(fbTouchPktBuf, fbTouchPktBuf.length, hostAddress, 9296);
-                }
-                fbTouchPlain[0] = (byte) (down ? 0xD0 : 0xC0);
-                fbTouchPlain[1] = (byte) (pointerId & 0x7F);
-                fbTouchPlain[2] = (byte) ((cx >> 4) & 0xFF);
-                fbTouchPlain[3] = (byte) (((cx & 0x0F) << 4) | ((cy >> 8) & 0x0F));
-                fbTouchPlain[4] = (byte) (cy & 0xFF);
-                feedbackSeqEvent = (feedbackSeqEvent + 1) & 0xFFFF;
-                sendFeedbackPacketZeroAllocLocked(0x01, feedbackSeqEvent, fbTouchPlain, fbTouchPktBuf, fbTouchPktWrap, fbTouchDatagram);
-            } catch (Exception e) {
-                android.util.Log.w("DRPS5", "Error enviando touchpad: " + e.getMessage());
-            }
-        }
+        // En lugar de enviar coordenadas de raton/swipe continuo que confunden a los juegos de PS5,
+        // canalizamos la accion directamente como pulsacion fisica del boton Touchpad (0x91).
+        sendButtonEvent(0x91, down);
     }
 
     private void sendControllerState() {
