@@ -91,6 +91,8 @@ public final class StreamOverlayMenu extends FrameLayout {
 
         btnResume = makeActionBtn(ctx, "▶  Volver al juego", true);
         btnResume.setOnClickListener(v -> {
+            selectedIndex = 0;
+            updateVisualSelection();
             hideMenu();
             if (listener != null) listener.onResumeGame();
         });
@@ -98,6 +100,8 @@ public final class StreamOverlayMenu extends FrameLayout {
 
         btnTouchpad = makeActionBtn(ctx, "⬜  Pulsar Boton Touchpad", false);
         btnTouchpad.setOnClickListener(v -> {
+            selectedIndex = 1;
+            updateVisualSelection();
             hideMenu();
             if (listener != null) listener.onSendTouchpad();
         });
@@ -105,25 +109,32 @@ public final class StreamOverlayMenu extends FrameLayout {
 
         btnUpscale = makeActionBtn(ctx, "✦  Reescalado GPU: " + cfg.getUpscaleLabel(), false);
         btnUpscale.setOnClickListener(v -> {
+            selectedIndex = 2;
+            updateVisualSelection();
             if (listener != null) listener.onCycleUpscale();
         });
         sheet.addView(btnUpscale, rowLp(ctx));
 
         btnTouch = makeActionBtn(ctx, "🎮  Controles tactiles", false);
         btnTouch.setOnClickListener(v -> {
+            selectedIndex = 3;
+            updateVisualSelection();
             if (listener != null) listener.onToggleTouchControls();
         });
         sheet.addView(btnTouch, rowLp(ctx));
 
         btnCompactHud = makeActionBtn(ctx, "⚙  HUD en pantalla: " + (cfg.compactHud ? "Solo icono" : "Completo"), false);
         btnCompactHud.setOnClickListener(v -> {
+            selectedIndex = 4;
+            updateVisualSelection();
             if (listener != null) listener.onToggleCompactHud();
         });
         sheet.addView(btnCompactHud, rowLp(ctx));
 
         btnDisconnect = makeActionBtn(ctx, "✕  Desconectar sesion", false);
-        btnDisconnect.setTextColor(WebOSTheme.COL_PS_CIRCLE);
         btnDisconnect.setOnClickListener(v -> {
+            selectedIndex = 5;
+            updateVisualSelection();
             hideMenu();
             if (listener != null) listener.onDisconnect();
         });
@@ -166,12 +177,41 @@ public final class StreamOverlayMenu extends FrameLayout {
         for (int i = 0; i < actionButtons.size(); i++) {
             TextView btn = actionButtons.get(i);
             boolean isSel = (i == selectedIndex);
+            btn.setSelected(isSel);
             if (isSel) {
+                if (btn == btnDisconnect) {
+                    btn.setBackground(WebOSTheme.makeCardDrawable(getContext(), 0xFFDC2626, 0xFFFFFFFF, 12, 2));
+                    btn.setTextColor(0xFFFFFFFF);
+                } else if (btn == btnResume) {
+                    btn.setBackground(WebOSTheme.makeCardDrawable(getContext(), WebOSTheme.COL_ACCENT_HI, 0xFFFFFFFF, 12, 2));
+                    btn.setTextColor(0xFF030712);
+                } else {
+                    btn.setBackground(WebOSTheme.makeCardDrawable(getContext(), WebOSTheme.COL_ACCENT, WebOSTheme.COL_ACCENT_HI, 12, 2));
+                    btn.setTextColor(0xFFFFFFFF);
+                }
+                btn.setScaleX(1.04f);
+                btn.setScaleY(1.04f);
+                try { btn.setElevation(WebOSTheme.dp(getContext(), 4)); } catch (Throwable ignored) {}
                 btn.requestFocus();
-                btn.animate().scaleX(1.03f).scaleY(1.03f).setDuration(80).start();
-                scroll.requestChildFocus(btn, btn);
+                final TextView target = btn;
+                post(() -> {
+                    int targetY = target.getTop() - (scroll.getHeight() / 2) + (target.getHeight() / 2);
+                    scroll.smoothScrollTo(0, Math.max(0, targetY));
+                });
             } else {
-                btn.animate().scaleX(1.0f).scaleY(1.0f).setDuration(80).start();
+                if (btn == btnDisconnect) {
+                    btn.setBackground(WebOSTheme.makeCardDrawable(getContext(), WebOSTheme.COL_FROST_BG, 0x55EF4444, 12, 1));
+                    btn.setTextColor(WebOSTheme.COL_PS_CIRCLE);
+                } else if (btn == btnResume) {
+                    btn.setBackground(WebOSTheme.makeCardDrawable(getContext(), 0x330284C7, WebOSTheme.COL_FROST_BORDER, 12, 1));
+                    btn.setTextColor(WebOSTheme.COL_TEXT);
+                } else {
+                    btn.setBackground(WebOSTheme.makeCardDrawable(getContext(), WebOSTheme.COL_FROST_BG, WebOSTheme.COL_FROST_BORDER, 12, 1));
+                    btn.setTextColor(WebOSTheme.COL_TEXT);
+                }
+                btn.setScaleX(1.0f);
+                btn.setScaleY(1.0f);
+                try { btn.setElevation(0f); } catch (Throwable ignored) {}
             }
         }
     }
@@ -197,18 +237,16 @@ public final class StreamOverlayMenu extends FrameLayout {
         tv.setTypeface(Typeface.DEFAULT_BOLD);
         tv.setPadding(WebOSTheme.dp(ctx, 14), WebOSTheme.dp(ctx, 9), WebOSTheme.dp(ctx, 14), WebOSTheme.dp(ctx, 9));
         tv.setFocusable(true);
+        tv.setFocusableInTouchMode(true);
         tv.setClickable(true);
-        tv.setBackground(primary ? WebOSTheme.makeAccentSelector(ctx, 12) : WebOSTheme.makeFrostSelector(ctx, 12));
-        
+        tv.setBackground(WebOSTheme.makeCardDrawable(ctx, WebOSTheme.COL_FROST_BG, WebOSTheme.COL_FROST_BORDER, 12, 1));
+
         final int myIdx = actionButtons.size();
         tv.setOnFocusChangeListener((v, hasFocus) -> {
-            if (hasFocus) {
+            if (hasFocus && selectedIndex != myIdx) {
                 selectedIndex = myIdx;
+                updateVisualSelection();
             }
-            if (!primary) {
-                tv.setTextColor(hasFocus ? WebOSTheme.COL_ON_FROST : (v == btnDisconnect ? WebOSTheme.COL_PS_CIRCLE : WebOSTheme.COL_TEXT));
-            }
-            v.animate().scaleX(hasFocus ? 1.02f : 1.0f).scaleY(hasFocus ? 1.02f : 1.0f).setDuration(100).start();
         });
         actionButtons.add(tv);
         return tv;

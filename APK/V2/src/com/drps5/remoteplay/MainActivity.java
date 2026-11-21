@@ -1178,6 +1178,14 @@ public final class MainActivity extends Activity {
         streamContainer.setOnTouchListener((v, ev) -> {
             if (!streaming || streamOverlayMenu.isMenuOpen()) return false;
             if (touchOverlay != null && touchOverlay.getVisibility() == View.VISIBLE) return false;
+            if (hasTouchScreen() && "auto".equals(cfg.touchControls) && touchOverlay != null && touchOverlay.getVisibility() != View.VISIBLE) {
+                touchOverlay.setVisibility(View.VISIBLE);
+                if (touchpadPill != null) {
+                    touchpadPill.setVisibility(View.VISIBLE);
+                    touchpadPill.setAlpha(1.0f);
+                }
+                touchOverlay.resetAutoHide();
+            }
             int action = ev.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 if (streamClient != null) streamClient.sendButtonEvent(0x91, true);
@@ -1209,14 +1217,26 @@ public final class MainActivity extends Activity {
                 toggleStreamOverlayMenu();
             }
         });
+        touchOverlay.setOnAlphaChangeListener(alpha -> {
+            if (touchpadPill != null) {
+                if (touchOverlay.getVisibility() != View.VISIBLE || alpha <= 0.05f) {
+                    touchpadPill.setVisibility(View.GONE);
+                } else {
+                    touchpadPill.setVisibility(View.VISIBLE);
+                    touchpadPill.setAlpha(alpha);
+                }
+            }
+        });
         touchOverlay.setVisibility(View.GONE);
 
-        // Boton Touchpad flotante en la parte superior central
+        // Boton Touchpad flotante en la parte superior central (sincronizado con controles virtuales)
         touchpadPill = WebOSTheme.makePill(this, "⬜ TOUCHPAD", 0xAA070B16, WebOSTheme.COL_TEXT);
         touchpadPill.setTextSize(11f);
         touchpadPill.setClickable(true);
         touchpadPill.setFocusable(false);
+        touchpadPill.setVisibility(View.GONE);
         touchpadPill.setOnTouchListener((v, ev) -> {
+            if (touchOverlay != null) touchOverlay.resetAutoHide();
             int action = ev.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 touchpadPill.setBackground(WebOSTheme.makeCardDrawable(this, WebOSTheme.COL_ACCENT, WebOSTheme.COL_ACCENT_HI, 50, 2));
@@ -1271,6 +1291,10 @@ public final class MainActivity extends Activity {
             public void onToggleTouchControls() {
                 boolean show = touchOverlay.getVisibility() != View.VISIBLE;
                 touchOverlay.setVisibility(show ? View.VISIBLE : View.GONE);
+                if (touchpadPill != null) {
+                    touchpadPill.setVisibility(show ? View.VISIBLE : View.GONE);
+                    touchpadPill.setAlpha(show ? 1.0f : 0.0f);
+                }
                 updateStreamOverlayInfo();
             }
             @Override
@@ -1341,6 +1365,10 @@ public final class MainActivity extends Activity {
         boolean showTouch = "always".equals(cfg.touchControls) ||
             ("auto".equals(cfg.touchControls) && !hasPhysicalGamepad && hasTouchScreen());
         touchOverlay.setVisibility(showTouch ? View.VISIBLE : View.GONE);
+        if (touchpadPill != null) {
+            touchpadPill.setVisibility(showTouch ? View.VISIBLE : View.GONE);
+            touchpadPill.setAlpha(showTouch ? 1.0f : 0.0f);
+        }
         streamHudPill.setText("Conectando a " + targetIp + "...");
         streamOverlayMenu.hideMenu();
 
@@ -1457,6 +1485,9 @@ public final class MainActivity extends Activity {
             directSurfaceView = null;
         }
         streamOverlayMenu.hideMenu();
+        if (touchpadPill != null) {
+            touchpadPill.setVisibility(View.GONE);
+        }
         streamContainer.setVisibility(View.GONE);
         homeRoot.setVisibility(View.VISIBLE);
         focusInitialConsole();
@@ -1546,26 +1577,47 @@ public final class MainActivity extends Activity {
         }
 
         if (streamOverlayMenu.isMenuOpen()) {
-            if (down && event.getRepeatCount() == 0) {
-                if (code == KeyEvent.KEYCODE_DPAD_UP || psBtn == 0x80) {
+            if (down) {
+                boolean isUp = (code == KeyEvent.KEYCODE_DPAD_UP || psBtn == 0x80);
+                boolean isDown = (code == KeyEvent.KEYCODE_DPAD_DOWN || psBtn == 0x81);
+                boolean isConfirm = (psBtn == confirmBtn)
+                    || code == KeyEvent.KEYCODE_DPAD_CENTER
+                    || code == KeyEvent.KEYCODE_ENTER
+                    || code == KeyEvent.KEYCODE_NUMPAD_ENTER
+                    || (!rawSony && code == KeyEvent.KEYCODE_BUTTON_A);
+                boolean isCancel = (psBtn == cancelBtn)
+                    || code == KeyEvent.KEYCODE_BACK
+                    || code == KeyEvent.KEYCODE_ESCAPE
+                    || (!rawSony && code == KeyEvent.KEYCODE_BUTTON_B);
+
+                if (isUp) {
                     streamOverlayMenu.moveSelection(-1);
                     return true;
                 }
-                if (code == KeyEvent.KEYCODE_DPAD_DOWN || psBtn == 0x81) {
+                if (isDown) {
                     streamOverlayMenu.moveSelection(1);
                     return true;
                 }
-                if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
-                    || code == KeyEvent.KEYCODE_NUMPAD_ENTER || code == KeyEvent.KEYCODE_BUTTON_A || psBtn == confirmBtn) {
+                if (isConfirm) {
                     streamOverlayMenu.activateCurrent();
                     return true;
                 }
-                if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_BUTTON_B || psBtn == cancelBtn || code == KeyEvent.KEYCODE_ESCAPE) {
+                if (isCancel) {
                     streamOverlayMenu.hideMenu();
                     return true;
                 }
             }
             return true;
+        }
+
+        // Si se detecta uso de mando físico o control remoto en streaming, ocultar botones virtuales
+        if (streaming && ((dev != null && (dev.getSources() & InputDevice.SOURCE_GAMEPAD) != 0) || psBtn != -1)) {
+            hasPhysicalGamepad = true;
+            if ("auto".equals(cfg.touchControls) && touchOverlay != null && touchOverlay.getVisibility() == View.VISIBLE) {
+                touchOverlay.setVisibility(View.GONE);
+                if (touchpadPill != null) touchpadPill.setVisibility(View.GONE);
+                updateStreamOverlayInfo();
+            }
         }
 
         if (psBtn == 0x8D || code == KeyEvent.KEYCODE_BUTTON_SELECT) gpShareDown = down;
@@ -1696,6 +1748,12 @@ public final class MainActivity extends Activity {
 
         if ((ev.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK &&
             ev.getAction() == MotionEvent.ACTION_MOVE) {
+            if (streaming && hasTouchScreen() && "auto".equals(cfg.touchControls) && touchOverlay != null && touchOverlay.getVisibility() == View.VISIBLE) {
+                hasPhysicalGamepad = true;
+                touchOverlay.setVisibility(View.GONE);
+                if (touchpadPill != null) touchpadPill.setVisibility(View.GONE);
+                updateStreamOverlayInfo();
+            }
             InputDevice dev = ev.getDevice();
             boolean rawSony = isRawSonyHidLayout(dev);
 

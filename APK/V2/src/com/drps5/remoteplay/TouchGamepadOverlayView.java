@@ -22,10 +22,15 @@ import java.util.Arrays;
         void sendTouchpadEvent(boolean down, int pointerId, int x, int y);
         void onMenuRequested();
     }
+    public interface OnAlphaChangeListener {
+        void onAlphaChanged(float alpha);
+    }
     private InputTarget target;
+    private OnAlphaChangeListener onAlphaChangeListener;
     private boolean livePadConnected = false;
     private short touchLx = 0, touchLy = 0, touchRx = 0, touchRy = 0;
     public void setInputTarget(InputTarget t) { this.target = t; }
+    public void setOnAlphaChangeListener(OnAlphaChangeListener l) { this.onAlphaChangeListener = l; }
     public void setLivePadConnected(boolean connected) { this.livePadConnected = connected; }
         private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -103,6 +108,10 @@ import java.util.Arrays;
             return false;
         }
 
+        public void resetAutoHide() {
+            showOverlayInstant();
+        }
+
         private void showOverlayInstant() {
             autoHideHandler.removeCallbacks(autoHideRunnable);
             if (fadeAnimator != null) {
@@ -113,6 +122,10 @@ import java.util.Arrays;
                 overlayAlpha = 1.0f;
                 invalidate();
             }
+            if (onAlphaChangeListener != null) {
+                onAlphaChangeListener.onAlphaChanged(overlayAlpha);
+            }
+            scheduleAutoHide();
         }
 
         private void scheduleAutoHide() {
@@ -131,9 +144,20 @@ import java.util.Arrays;
                 public void onAnimationUpdate(ValueAnimator animation) {
                     overlayAlpha = (Float) animation.getAnimatedValue();
                     invalidate();
+                    if (onAlphaChangeListener != null) {
+                        onAlphaChangeListener.onAlphaChanged(overlayAlpha);
+                    }
                 }
             });
             fadeAnimator.start();
+        }
+
+        @Override
+        public void setVisibility(int visibility) {
+            super.setVisibility(visibility);
+            if (onAlphaChangeListener != null) {
+                onAlphaChangeListener.onAlphaChanged(visibility == VISIBLE ? overlayAlpha : 0f);
+            }
         }
 
         @Override
